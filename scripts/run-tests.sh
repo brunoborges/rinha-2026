@@ -10,11 +10,16 @@
 # rewrite (their logic, payloads and scoring are untouched).
 #
 # Usage:
-#   ./scripts/run-tests.sh up       # build + start the stack, wait until healthy
+#   ./scripts/run-tests.sh build    # (re)build the API image (native-image, slow)
+#   ./scripts/run-tests.sh up       # start the stack (no rebuild), wait until healthy
 #   ./scripts/run-tests.sh smoke    # up, then run the smoke test (1 VU x 5)
 #   ./scripts/run-tests.sh load     # up, then run the full load test (-> 900 rps)
 #   ./scripts/run-tests.sh stats    # one-shot `docker stats` of the stack
 #   ./scripts/run-tests.sh down     # tear the stack down
+#
+# `up`/`smoke`/`load` do NOT rebuild the image — run `build` first after changing
+# source. This keeps the load-test loop fast (an env-only change, e.g. SCORER,
+# needs no rebuild) and makes the costly native-image build an explicit step.
 #
 set -euo pipefail
 
@@ -29,9 +34,15 @@ BASE_URL="http://localhost:9999"
 log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; }
 
+stack_build() {
+    log "Building the API image (native-image; this also builds references.bin)…"
+    $COMPOSE build
+    log "Image built."
+}
+
 stack_up() {
-    log "Building and starting the stack (this also builds references.bin)…"
-    $COMPOSE up -d --build --wait --wait-timeout 300
+    log "Starting the stack (no rebuild; run 'build' first if source changed)…"
+    $COMPOSE up -d --wait --wait-timeout 300
     log "Stack is up. Waiting for ${BASE_URL}/ready via the load balancer…"
     for i in $(seq 1 60); do
         if curl -fsS "${BASE_URL}/ready" >/dev/null 2>&1; then
@@ -85,6 +96,7 @@ run_k6() {
 }
 
 case "${1:-smoke}" in
+    build) stack_build ;;
     up)    stack_up ;;
     smoke) stack_up && run_k6 smoke.js ;;
     load)  stack_up && run_k6 test.js ;;
