@@ -85,8 +85,15 @@ COPY --from=build /src/target/rinha-2026-1.0-SNAPSHOT.jar ./app.jar
 
 # Ahead-of-time compile the server to a standalone native executable.
 #   --no-fallback                     fail rather than emit a JVM-fallback image
-#   --gc=serial                       small-footprint GC (Epsilon would OOM a
-#                                     long-running, per-request-allocating server)
+#   --gc=G1                           Oracle GraalVM ships G1 for native image
+#                                     (Community has only Serial). G1 is
+#                                     generational and mostly-concurrent, so its
+#                                     pauses are short and bounded instead of the
+#                                     single-threaded stop-the-world full GCs that
+#                                     spiked our p99 tail under per-request
+#                                     allocation. We still cap the heap so the
+#                                     84MB mmap'd dataset stays page-resident
+#                                     within the 165MB/instance budget.
 #   -march=compatibility              portable baseline ISA (we ship a container
 #                                     to an unknown eval CPU; -march=native -> SIGILL)
 #   --enable-native-access            FFM mmap (Arena/MemorySegment/FileChannel.map)
@@ -99,7 +106,7 @@ COPY --from=build /src/target/rinha-2026-1.0-SNAPSHOT.jar ./app.jar
 RUN mkdir -p /app; \
     native-image \
         --no-fallback \
-        --gc=serial \
+        --gc=G1 \
         -march=compatibility \
         --enable-native-access=ALL-UNNAMED \
         --add-modules=jdk.httpserver \
