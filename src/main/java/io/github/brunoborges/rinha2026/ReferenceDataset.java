@@ -276,10 +276,20 @@ public final class ReferenceDataset implements AutoCloseable {
     /** Quantizes a full normalized vector. */
     public static short[] quantize(double[] vector) {
         short[] q = new short[vector.length];
-        for (int i = 0; i < vector.length; i++) {
-            q[i] = quantize(vector[i]);
-        }
+        quantizeInto(vector, q);
         return q;
+    }
+
+    /**
+     * Allocation-free variant of {@link #quantize(double[])}: writes the
+     * quantized form of {@code vector} into the caller-supplied {@code out}
+     * (length &ge; {@code vector.length}). Lets the request path reuse a pooled
+     * {@code short[]} instead of allocating one per query.
+     */
+    public static void quantizeInto(double[] vector, short[] out) {
+        for (int i = 0; i < vector.length; i++) {
+            out[i] = quantize(vector[i]);
+        }
     }
 
     /**

@@ -36,6 +36,7 @@ public class App {
     private static final byte[] READY_BODY = "{\"status\":\"ready\"}".getBytes(UTF_8);
 
     private final FraudScorer scorer;
+    private final RequestVectorParser parser;
 
     public App() {
         this(loadDefaultScorer());
@@ -43,6 +44,9 @@ public class App {
 
     public App(FraudScorer scorer) {
         this.scorer = scorer;
+        this.parser = scorer.supportsVectorInput()
+                ? new RequestVectorParser(scorer.vectorizer())
+                : null;
     }
 
     /**
@@ -53,6 +57,23 @@ public class App {
      * development and tests.
      */
     private static FraudScorer loadDefaultScorer() {
+        // Diagnostic override for bottleneck attribution (see
+        // VectorizeOnlyFraudScorer): SCORER=stub isolates the HTTP/parse/serialize
+        // path, SCORER=vectorize adds feature extraction, default/ivf is the full
+        // search. Only honoured when explicitly set.
+        String mode = System.getenv("SCORER");
+        if (mode != null) {
+            mode = mode.trim().toLowerCase();
+            if (mode.equals("stub")) {
+                LOG.warning("SCORER=stub: serving constant responses (HTTP-path-only diagnostic).");
+                return new StubFraudScorer();
+            }
+            if (mode.equals("vectorize")) {
+                LOG.warning("SCORER=vectorize: vectorizing only, skipping the scan (diagnostic).");
+                return new VectorizeOnlyFraudScorer(new TransactionVectorizer());
+            }
+        }
+
         Path bin = resolvePath("REFERENCES_BIN", DEFAULT_REFERENCES_BIN);
         if (Files.isReadable(bin)) {
             try {
@@ -160,26 +181,58 @@ public class App {
                 sendError(exchange, 405, "method not allowed");
                 return;
             }
-
-            FraudRequest request;
-            try {
-                request = FraudRequestParser.parse(exchange.getRequestBody());
-            } catch (IOException e) {
-                sendError(exchange, 400, "invalid JSON: " + e.getMessage());
-                return;
+            if (parser != null) {
+                scoreStreaming(exchange);
+            } else {
+                scoreFromRecord(exchange);
             }
-
-            String validationError = validate(request);
-            if (validationError != null) {
-                sendError(exchange, 400, validationError);
-                return;
-            }
-
-            FraudResponse response = scorer.score(request);
-            send(exchange, 200, scoreBody(response));
         } finally {
             exchange.close();
         }
+    }
+
+    /**
+     * Hot path: parse the body straight into a pooled feature vector and score it,
+     * allocating no {@link FraudRequest} graph. Any malformed input (bad JSON,
+     * missing required section, invalid timestamp) surfaces as an
+     * {@link IOException} and is reported as {@code HTTP 400}, matching the
+     * record path's rejection behaviour.
+     */
+    private void scoreStreaming(HttpExchange exchange) throws IOException {
+        RequestVectorParser.State st = parser.acquire();
+        try {
+            parser.vectorize(exchange.getRequestBody(), st);
+            FraudResponse response = scorer.scoreVector(st.qvec);
+            send(exchange, 200, scoreBody(response));
+        } catch (IOException e) {
+            sendError(exchange, 400, e.getMessage());
+        } finally {
+            parser.release(st);
+        }
+    }
+
+    /**
+     * Fallback path for scorers that do not support vector input (the {@code stub}
+     * and {@code vectorize} diagnostic modes): parse into a {@link FraudRequest},
+     * validate, and score.
+     */
+    private void scoreFromRecord(HttpExchange exchange) throws IOException {
+        FraudRequest request;
+        try {
+            request = FraudRequestParser.parse(exchange.getRequestBody());
+        } catch (IOException e) {
+            sendError(exchange, 400, "invalid JSON: " + e.getMessage());
+            return;
+        }
+
+        String validationError = validate(request);
+        if (validationError != null) {
+            sendError(exchange, 400, validationError);
+            return;
+        }
+
+        FraudResponse response = scorer.score(request);
+        send(exchange, 200, scoreBody(response));
     }
 
     /**

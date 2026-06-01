@@ -1,6 +1,5 @@
 package io.github.brunoborges.rinha2026;
 
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -37,6 +36,10 @@ public final class TransactionVectorizer {
 
     /** Sentinel used at indices 5 and 6 when {@code last_transaction} is null. */
     public static final double NO_HISTORY = -1.0;
+
+    private static final long SECONDS_PER_MINUTE = 60L;
+    private static final long SECONDS_PER_HOUR = 3_600L;
+    private static final long SECONDS_PER_DAY = 86_400L;
 
     /**
      * Normalization constants from {@code resources/normalization.json}.
@@ -98,40 +101,109 @@ public final class TransactionVectorizer {
      * @return a freshly allocated array of length {@link #DIMENSIONS}
      */
     public double[] vectorize(FraudRequest request) {
+        double[] v = new double[DIMENSIONS];
+        vectorizeInto(request, v);
+        return v;
+    }
+
+    /**
+     * Allocation-free variant of {@link #vectorize(FraudRequest)}: writes the
+     * 14-dimension vector into the caller-supplied {@code v} (length &ge;
+     * {@link #DIMENSIONS}). Every dimension is written unconditionally so a
+     * reused buffer never leaks values from a previous request.
+     *
+     * <p>Hour-of-day and day-of-week are derived from the UTC epoch second with
+     * pure integer arithmetic rather than {@code requestedAt().atZone(UTC)}, and
+     * the minutes-since-last-transaction from an epoch-second subtraction rather
+     * than {@link java.time.Duration} &mdash; both avoid the {@code java.time}
+     * object graph that would otherwise be allocated and discarded per request.
+     *
+     * @param request the incoming transaction payload (not {@code null})
+     * @param v       the destination buffer (length &ge; {@link #DIMENSIONS})
+     */
+    public void vectorizeInto(FraudRequest request, double[] v) {
         FraudRequest.Transaction tx = request.transaction();
         FraudRequest.Customer customer = request.customer();
         FraudRequest.Merchant merchant = request.merchant();
         FraudRequest.Terminal terminal = request.terminal();
         FraudRequest.LastTransaction last = request.lastTransaction();
+        boolean hasLast = last != null;
 
-        var dateTime = tx.requestedAt().atZone(ZoneOffset.UTC);
+        vectorizeInto(
+                tx.amount(), tx.installments(), tx.requestedAt().getEpochSecond(),
+                customer.avgAmount(), customer.txCount24h(),
+                isUnknownMerchant(merchant.id(), customer.knownMerchants()),
+                merchant.mcc(), merchant.avgAmount(), terminal.kmFromHome(),
+                terminal.isOnline(), terminal.cardPresent(),
+                hasLast, hasLast ? last.timestamp().getEpochSecond() : 0L,
+                hasLast ? last.kmFromCurrent() : 0.0,
+                v);
+    }
 
-        double[] v = new double[DIMENSIONS];
+    /**
+     * Primitive-core variant of {@link #vectorizeInto(FraudRequest, double[])}
+     * that takes the already-extracted scalar features instead of the
+     * {@link FraudRequest} record graph. The streaming hot path
+     * ({@link RequestVectorParser}) calls this directly so a request can be parsed
+     * straight into its feature vector without allocating the record graph, the
+     * {@code known_merchants} list, or the {@link java.time.Instant} objects. The
+     * {@link FraudRequest} overload delegates here, so both paths share identical
+     * math.
+     *
+     * @param amount              transaction amount
+     * @param installments        number of installments
+     * @param requestedEpoch      transaction time as a UTC epoch second
+     * @param customerAvgAmount   customer average transaction amount
+     * @param txCount24h          customer transaction count in the last 24h
+     * @param unknownMerchant     whether the merchant is outside the customer's
+     *                            {@code known_merchants}
+     * @param mcc                 merchant category code (may be {@code null})
+     * @param merchantAvgAmount   merchant average transaction amount
+     * @param kmFromHome          terminal distance from the customer's home
+     * @param isOnline            whether the terminal is online
+     * @param cardPresent         whether the card was present
+     * @param hasLast             whether a previous transaction is known
+     * @param lastEpoch           previous transaction time (UTC epoch second);
+     *                            ignored when {@code hasLast} is {@code false}
+     * @param lastKmFromCurrent   distance from the previous transaction; ignored
+     *                            when {@code hasLast} is {@code false}
+     * @param v                   the destination buffer (length &ge;
+     *                            {@link #DIMENSIONS})
+     */
+    public void vectorizeInto(
+            double amount, int installments, long requestedEpoch,
+            double customerAvgAmount, int txCount24h, boolean unknownMerchant,
+            String mcc, double merchantAvgAmount, double kmFromHome,
+            boolean isOnline, boolean cardPresent,
+            boolean hasLast, long lastEpoch, double lastKmFromCurrent,
+            double[] v) {
+        // UTC hour-of-day (00:00 == epoch second 0) and ISO day-of-week
+        // (Mon=1..Sun=7; epoch day 0 == 1970-01-01 == Thursday == 4).
+        int hour = (int) (Math.floorMod(requestedEpoch, SECONDS_PER_DAY) / SECONDS_PER_HOUR);
+        int dayOfWeek = (int) Math.floorMod(Math.floorDiv(requestedEpoch, SECONDS_PER_DAY) + 3, 7) + 1;
 
-        v[0] = clamp(tx.amount() / constants.maxAmount());
-        v[1] = clamp(tx.installments() / constants.maxInstallments());
-        v[2] = clamp((tx.amount() / customer.avgAmount()) / constants.amountVsAvgRatio());
-        v[3] = dateTime.getHour() / 23.0;
-        v[4] = (dateTime.getDayOfWeek().getValue() - 1) / 6.0;
+        v[0] = clamp(amount / constants.maxAmount());
+        v[1] = clamp(installments / constants.maxInstallments());
+        v[2] = clamp((amount / customerAvgAmount) / constants.amountVsAvgRatio());
+        v[3] = hour / 23.0;
+        v[4] = (dayOfWeek - 1) / 6.0;
 
-        if (last == null) {
+        if (!hasLast) {
             v[5] = NO_HISTORY;
             v[6] = NO_HISTORY;
         } else {
-            double minutes = java.time.Duration.between(last.timestamp(), tx.requestedAt()).toMinutes();
+            long minutes = (requestedEpoch - lastEpoch) / SECONDS_PER_MINUTE;
             v[5] = clamp(minutes / constants.maxMinutes());
-            v[6] = clamp(last.kmFromCurrent() / constants.maxKm());
+            v[6] = clamp(lastKmFromCurrent / constants.maxKm());
         }
 
-        v[7] = clamp(terminal.kmFromHome() / constants.maxKm());
-        v[8] = clamp(customer.txCount24h() / constants.maxTxCount24h());
-        v[9] = terminal.isOnline() ? 1.0 : 0.0;
-        v[10] = terminal.cardPresent() ? 1.0 : 0.0;
-        v[11] = isUnknownMerchant(merchant.id(), customer.knownMerchants()) ? 1.0 : 0.0;
-        v[12] = mccRisk.getOrDefault(merchant.mcc(), DEFAULT_MCC_RISK);
-        v[13] = clamp(merchant.avgAmount() / constants.maxMerchantAvgAmount());
-
-        return v;
+        v[7] = clamp(kmFromHome / constants.maxKm());
+        v[8] = clamp(txCount24h / constants.maxTxCount24h());
+        v[9] = isOnline ? 1.0 : 0.0;
+        v[10] = cardPresent ? 1.0 : 0.0;
+        v[11] = unknownMerchant ? 1.0 : 0.0;
+        v[12] = mccRisk.getOrDefault(mcc, DEFAULT_MCC_RISK);
+        v[13] = clamp(merchantAvgAmount / constants.maxMerchantAvgAmount());
     }
 
     private static boolean isUnknownMerchant(String merchantId, List<String> knownMerchants) {

@@ -39,29 +39,15 @@ WORKDIR /src
 COPY .mvn ./.mvn
 COPY mvnw pom.xml ./
 
-# This image ships JDK 25; point the maven-toolchains entry (declared as version
-# ${toolchain.jdk.version}) at it. The committed toolchains.xml refers to a
-# host-only .jdk path that doesn't exist here.
-RUN printf '%s\n' \
-    '<?xml version="1.0" encoding="UTF-8"?>' \
-    '<toolchains xmlns="http://maven.apache.org/TOOLCHAINS/1.1.0">' \
-    '  <toolchain>' \
-    '    <type>jdk</type>' \
-    '    <provides><version>25</version><vendor>openjdk</vendor></provides>' \
-    "    <configuration><jdkHome>${JAVA_HOME}</jdkHome></configuration>" \
-    '  </toolchain>' \
-    '</toolchains>' > .mvn/toolchains.xml
-
-# Warm the dependency cache (release 25 / toolchain 25 for this JDK).
-RUN mvn -B -q -Dtoolchain.jdk.version=25 -Dmaven.compiler.release=25 \
-    dependency:go-offline || true
+# Warm the dependency cache.
+RUN mvn -B -q dependency:go-offline || true
 
 COPY src ./src
 
 # Build the shaded jar. databind/jsr310 are test-scoped, so the jar is
 # reflection-free (only jackson-core streaming + jackson-annotations). Tests run
-# on the host (they need JDK 27); skip them here.
-RUN mvn -B -DskipTests -Dtoolchain.jdk.version=25 -Dmaven.compiler.release=25 package
+# on the host; skip them here.
+RUN mvn -B -DskipTests package
 
 # Pre-build the binary reference dataset (offline JSON -> off-heap int16 .bin)
 # WITH an IVF (inverted-file) ANN index baked in (version-2 format): k-means

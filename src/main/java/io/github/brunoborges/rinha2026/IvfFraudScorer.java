@@ -2,7 +2,6 @@ package io.github.brunoborges.rinha2026;
 
 import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.Semaphore;
 import java.util.logging.Logger;
 
 /**
@@ -51,8 +50,7 @@ public final class IvfFraudScorer implements FraudScorer {
 
     private final TransactionVectorizer vectorizer;
     private final ReferenceDataset dataset;
-    private final Semaphore scanPermits;
-    private final ArrayBlockingQueue<short[]> bufferPool;
+    private final ArrayBlockingQueue<Scratch> scratchPool;
     private final int nprobe;
     private final int scanCap;
 
@@ -70,11 +68,13 @@ public final class IvfFraudScorer implements FraudScorer {
         this.dataset = dataset;
         this.nprobe = Math.max(1, Math.min(nprobe, dataset.clusters()));
         this.scanCap = Math.max(K, scanCap);
+        // One reusable Scratch per permit; the bounded pool both caps concurrent
+        // scans (take() blocks when empty) and recycles every per-request buffer,
+        // so scoring allocates nothing on the heap after warmup.
         int permits = Math.max(1, Runtime.getRuntime().availableProcessors());
-        this.scanPermits = new Semaphore(permits);
-        this.bufferPool = new ArrayBlockingQueue<>(permits);
+        this.scratchPool = new ArrayBlockingQueue<>(permits);
         for (int i = 0; i < permits; i++) {
-            this.bufferPool.add(new short[CHUNK * DIMS]);
+            this.scratchPool.add(new Scratch(this.nprobe));
         }
         LOG.info(() -> "IVF scorer: clusters=" + dataset.clusters() + ", nprobe=" + this.nprobe
                 + ", scanCap=" + this.scanCap + ", scanThreads=" + permits);
@@ -82,8 +82,42 @@ public final class IvfFraudScorer implements FraudScorer {
 
     @Override
     public FraudResponse score(FraudRequest request) {
-        short[] query = ReferenceDataset.quantize(vectorizer.vectorize(request));
-        int frauds = countFraudsAmongNearest(query);
+        int frauds;
+        Scratch s = borrow();
+        try {
+            vectorizer.vectorizeInto(request, s.qvec);
+            ReferenceDataset.quantizeInto(s.qvec, s.query);
+            frauds = scan(s.query, s);
+        } finally {
+            scratchPool.offer(s);
+        }
+        return toResponse(frauds);
+    }
+
+    @Override
+    public boolean supportsVectorInput() {
+        return true;
+    }
+
+    @Override
+    public TransactionVectorizer vectorizer() {
+        return vectorizer;
+    }
+
+    @Override
+    public FraudResponse scoreVector(double[] qvec) {
+        int frauds;
+        Scratch s = borrow();
+        try {
+            ReferenceDataset.quantizeInto(qvec, s.query);
+            frauds = scan(s.query, s);
+        } finally {
+            scratchPool.offer(s);
+        }
+        return toResponse(frauds);
+    }
+
+    private FraudResponse toResponse(int frauds) {
         int k = Math.min(K, dataset.count());
         double fraudScore = (double) frauds / k;
         boolean approved = fraudScore < THRESHOLD;
@@ -97,78 +131,122 @@ public final class IvfFraudScorer implements FraudScorer {
 
     /**
      * Package-private hook used by tests to exercise the IVF candidate search
-     * directly with a quantized query, bypassing vectorization.
+     * directly with a quantized query, bypassing vectorization. Borrows a pooled
+     * {@link Scratch} so it shares the production allocation-free scan path.
      */
     int countFraudsAmongNearest(short[] query) {
+        Scratch s = borrow();
+        try {
+            return scan(query, s);
+        } finally {
+            scratchPool.offer(s);
+        }
+    }
+
+    /**
+     * Core IVF search over {@code query} using the caller-owned {@code s} for all
+     * working memory (centroid shortlist, neighbor heap, and the bulk-copy
+     * buffer). Every reused region is reset over its active prefix before use, so
+     * no state leaks between requests.
+     */
+    private int scan(short[] query, Scratch s) {
         int clusters = dataset.clusters();
         int p = Math.min(nprobe, clusters);
 
         // Find the p nearest centroids (bounded buffer of (distance, clusterId)).
-        long[] cdist = new long[p];
-        int[] cid = new int[p];
-        Arrays.fill(cdist, Long.MAX_VALUE);
+        long[] cdist = s.cdist;
+        int[] cid = s.cid;
+        Arrays.fill(cdist, 0, p, Long.MAX_VALUE);
         int worst = 0;
         for (int c = 0; c < clusters; c++) {
             long d = dataset.centroidSquaredDistance(query, c);
             if (d < cdist[worst]) {
                 cdist[worst] = d;
                 cid[worst] = c;
-                worst = indexOfMax(cdist);
+                worst = indexOfMax(cdist, p);
             }
         }
-        sortByDistance(cdist, cid);
+        sortByDistance(cdist, cid, p);
 
         int count = dataset.count();
         int k = Math.min(K, count);
-        long[] bestDist = new long[k];
-        boolean[] bestFraud = new boolean[k];
-        Arrays.fill(bestDist, Long.MAX_VALUE);
+        long[] bestDist = s.bestDist;
+        boolean[] bestFraud = s.bestFraud;
+        Arrays.fill(bestDist, 0, k, Long.MAX_VALUE);
+        Arrays.fill(bestFraud, 0, k, false);
         int worstNeighbor = 0;
 
-        scanPermits.acquireUninterruptibly();
-        short[] buf = null;
-        try {
-            buf = bufferPool.take();
-            int scanned = 0;
-            scan:
-            for (int j = 0; j < p; j++) {
-                int c = cid[j];
-                int start = dataset.clusterStart(c);
-                int end = dataset.clusterEnd(c);
-                for (int base = start; base < end; base += CHUNK) {
-                    int remaining = scanCap - scanned;
-                    if (remaining <= 0) {
-                        break scan;
-                    }
-                    int n = Math.min(Math.min(CHUNK, end - base), remaining);
-                    dataset.copyVectorRange(base, n, buf, 0);
-                    for (int t = 0; t < n; t++) {
-                        long d2 = squaredDistance(query, buf, t * DIMS);
-                        if (d2 < bestDist[worstNeighbor]) {
-                            bestDist[worstNeighbor] = d2;
-                            bestFraud[worstNeighbor] = dataset.isFraud(base + t);
-                            worstNeighbor = indexOfMax(bestDist);
-                        }
-                    }
-                    scanned += n;
+        short[] buf = s.buf;
+        int scanned = 0;
+        scan:
+        for (int j = 0; j < p; j++) {
+            int c = cid[j];
+            int start = dataset.clusterStart(c);
+            int end = dataset.clusterEnd(c);
+            for (int base = start; base < end; base += CHUNK) {
+                int remaining = scanCap - scanned;
+                if (remaining <= 0) {
+                    break scan;
                 }
+                int n = Math.min(Math.min(CHUNK, end - base), remaining);
+                dataset.copyVectorRange(base, n, buf, 0);
+                for (int t = 0; t < n; t++) {
+                    long d2 = squaredDistance(query, buf, t * DIMS);
+                    if (d2 < bestDist[worstNeighbor]) {
+                        bestDist[worstNeighbor] = d2;
+                        bestFraud[worstNeighbor] = dataset.isFraud(base + t);
+                        worstNeighbor = indexOfMax(bestDist, k);
+                    }
+                }
+                scanned += n;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } finally {
-            if (buf != null) {
-                bufferPool.offer(buf);
-            }
-            scanPermits.release();
         }
 
         int frauds = 0;
-        for (boolean f : bestFraud) {
-            if (f) {
+        for (int i = 0; i < k; i++) {
+            if (bestFraud[i]) {
                 frauds++;
             }
         }
         return frauds;
+    }
+
+    /** Takes a Scratch from the pool, retrying through interrupts. */
+    private Scratch borrow() {
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    return scratchPool.take();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Per-request working memory, recycled through {@link #scratchPool}. Sizing
+     * the pool to the permit count means a request always finds a free Scratch
+     * once it is admitted, so the steady-state scoring path is allocation-free.
+     */
+    private static final class Scratch {
+        final double[] qvec = new double[DIMS];
+        final short[] query = new short[DIMS];
+        final long[] cdist;
+        final int[] cid;
+        final long[] bestDist = new long[K];
+        final boolean[] bestFraud = new boolean[K];
+        final short[] buf = new short[CHUNK * DIMS];
+
+        Scratch(int nprobe) {
+            this.cdist = new long[nprobe];
+            this.cid = new int[nprobe];
+        }
     }
 
     /**
@@ -191,9 +269,9 @@ public final class IvfFraudScorer implements FraudScorer {
         return sum0 + sum1;
     }
 
-    /** Insertion sort of the (distance, clusterId) pairs by ascending distance. */
-    private static void sortByDistance(long[] dist, int[] id) {
-        for (int i = 1; i < dist.length; i++) {
+    /** Insertion sort of the first {@code len} (distance, clusterId) pairs by ascending distance. */
+    private static void sortByDistance(long[] dist, int[] id, int len) {
+        for (int i = 1; i < len; i++) {
             long d = dist[i];
             int c = id[i];
             int j = i - 1;
@@ -207,9 +285,9 @@ public final class IvfFraudScorer implements FraudScorer {
         }
     }
 
-    private static int indexOfMax(long[] values) {
+    private static int indexOfMax(long[] values, int len) {
         int max = 0;
-        for (int i = 1; i < values.length; i++) {
+        for (int i = 1; i < len; i++) {
             if (values[i] > values[max]) {
                 max = i;
             }
