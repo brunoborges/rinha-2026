@@ -32,8 +32,19 @@ public final class IvfFraudScorer implements FraudScorer {
     /** Approval threshold: approved when {@code fraud_score < THRESHOLD}. */
     public static final double THRESHOLD = 0.6;
 
-    /** Number of clusters probed per query unless overridden by {@code NPROBE}. */
-    public static final int DEFAULT_NPROBE = 24;
+    /**
+     * Number of clusters probed per query unless overridden by {@code NPROBE}.
+     *
+     * <p>Tuned empirically against the official load test (see docs/EVALUATION.md
+     * scoring). Detection quality is effectively cap-saturated by ~8 probes
+     * (rate_component stays pinned at its 3000 ceiling), so probing more clusters
+     * buys only a tiny absolute-penalty reduction while scan cost — and therefore
+     * p99 latency — grows linearly. Past the CPU-saturation knee, the tail latency
+     * blows up super-linearly. NPROBE=8 sits just below that knee: in the native
+     * sweep it scored ~3970 vs ~3060 at NPROBE=24 (a ~900-point gain almost
+     * entirely from p99), with failure_rate ~0.0005 (far under the 15% cutoff).
+     */
+    public static final int DEFAULT_NPROBE = 8;
 
     /** Maximum records scanned per query unless overridden by {@code SCAN_CAP}. */
     public static final int DEFAULT_SCAN_CAP = 120_000;

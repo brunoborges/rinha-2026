@@ -26,6 +26,7 @@ services:
     environment:
       PORT: "8080"
       SCORER: "${SCORER:-ivf}"
+      NPROBE: "${NPROBE:-8}"
       WORKERS: "${WORKERS:-4}"
     networks:
       - rinha-net
@@ -42,6 +43,7 @@ services:
     environment:
       PORT: "8080"
       SCORER: "${SCORER:-ivf}"
+      NPROBE: "${NPROBE:-8}"
       WORKERS: "${WORKERS:-4}"
     networks:
       - rinha-net
