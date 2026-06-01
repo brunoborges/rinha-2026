@@ -26,8 +26,9 @@ import java.util.concurrent.ArrayBlockingQueue;
  * reused {@link State#km} array and the unknown-merchant test runs after the
  * object closes.
  *
- * <p>Working memory is recycled through a bounded {@link State} pool sized to the
- * available processors, so after warmup the streaming path allocates only the
+ * <p>Working memory is recycled through a bounded {@link State} pool sized by the
+ * {@code WORKERS} knob (see {@link Concurrency}), so after warmup the streaming
+ * path allocates only the
  * short {@link String}s for the merchant id/mcc and {@code known_merchants}
  * entries (everything else is written into reused buffers). The jackson-core
  * {@link JsonFactory} is configured with a virtual-thread-friendly recycler pool
@@ -45,7 +46,7 @@ final class RequestVectorParser {
         this.factory = JsonFactory.builder()
                 .recyclerPool(JsonRecyclerPools.newConcurrentDequePool())
                 .build();
-        int permits = Math.max(1, Runtime.getRuntime().availableProcessors());
+        int permits = Concurrency.workers();
         this.pool = new ArrayBlockingQueue<>(permits);
         for (int i = 0; i < permits; i++) {
             pool.add(new State());

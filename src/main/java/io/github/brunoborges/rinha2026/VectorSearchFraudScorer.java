@@ -15,8 +15,9 @@ import java.util.concurrent.ArrayBlockingQueue;
  *
  * <p>The scan is O(count &times; dimensions) per request. Because the challenge
  * caps the solution at one CPU unit, concurrent scans only thrash the cache, so
- * scoring is bounded by a pool of reusable {@link Scratch} buffers sized to the
- * available processors; HTTP concurrency (virtual threads) is unaffected. The
+ * scoring is bounded by a pool of reusable {@link Scratch} buffers sized by the
+ * {@code WORKERS} knob (see {@link Concurrency}); HTTP concurrency (virtual
+ * threads) is unaffected. The
  * pool doubles as the allocation arena, so steady-state scoring allocates
  * nothing on the heap.
  */
@@ -44,7 +45,7 @@ public final class VectorSearchFraudScorer implements FraudScorer {
         }
         this.vectorizer = vectorizer;
         this.dataset = dataset;
-        int permits = Math.max(1, Runtime.getRuntime().availableProcessors());
+        int permits = Concurrency.workers();
         this.scratchPool = new ArrayBlockingQueue<>(permits);
         for (int i = 0; i < permits; i++) {
             this.scratchPool.add(new Scratch());

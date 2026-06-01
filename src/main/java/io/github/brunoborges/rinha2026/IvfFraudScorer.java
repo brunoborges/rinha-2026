@@ -70,8 +70,10 @@ public final class IvfFraudScorer implements FraudScorer {
         this.scanCap = Math.max(K, scanCap);
         // One reusable Scratch per permit; the bounded pool both caps concurrent
         // scans (take() blocks when empty) and recycles every per-request buffer,
-        // so scoring allocates nothing on the heap after warmup.
-        int permits = Math.max(1, Runtime.getRuntime().availableProcessors());
+        // so scoring allocates nothing on the heap after warmup. Sized by WORKERS
+        // (not availableProcessors, which the cgroup pins to 1) so several
+        // memory-stall-bound scans can overlap within the CPU quota.
+        int permits = Concurrency.workers();
         this.scratchPool = new ArrayBlockingQueue<>(permits);
         for (int i = 0; i < permits; i++) {
             this.scratchPool.add(new Scratch(this.nprobe));

@@ -200,15 +200,20 @@ public class App {
      */
     private void scoreStreaming(HttpExchange exchange) throws IOException {
         RequestVectorParser.State st = parser.acquire();
+        FraudResponse response;
         try {
             parser.vectorize(exchange.getRequestBody(), st);
-            FraudResponse response = scorer.scoreVector(st.qvec);
-            send(exchange, 200, scoreBody(response));
+            response = scorer.scoreVector(st.qvec);
         } catch (IOException e) {
             sendError(exchange, 400, e.getMessage());
+            return;
         } finally {
+            // qvec is consumed by scoreVector, so the State can be recycled before
+            // the (potentially slow) response write — keeping the parser pool free
+            // to admit the next request rather than gating on the network.
             parser.release(st);
         }
+        send(exchange, 200, scoreBody(response));
     }
 
     /**

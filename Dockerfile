@@ -69,36 +69,17 @@ FROM container-registry.oracle.com/graalvm/native-image:25 AS native
 WORKDIR /src
 COPY --from=build /src/target/rinha-2026-1.0-SNAPSHOT.jar ./app.jar
 
-# Ahead-of-time compile the server to a standalone native executable.
-#   --no-fallback                     fail rather than emit a JVM-fallback image
-#   --gc=G1                           Oracle GraalVM ships G1 for native image
-#                                     (Community has only Serial). G1 is
-#                                     generational and mostly-concurrent, so its
-#                                     pauses are short and bounded instead of the
-#                                     single-threaded stop-the-world full GCs that
-#                                     spiked our p99 tail under per-request
-#                                     allocation. We still cap the heap so the
-#                                     84MB mmap'd dataset stays page-resident
-#                                     within the 165MB/instance budget.
-#   -march=compatibility              portable baseline ISA (we ship a container
-#                                     to an unknown eval CPU; -march=native -> SIGILL)
-#   --enable-native-access            FFM mmap (Arena/MemorySegment/FileChannel.map)
-#   --add-modules=jdk.httpserver      com.sun.net.httpserver reachability
-#   -R:MaxHeapSize / -R:ActiveProcessorCount   bake the runtime limits in, so the
-#                                     binary needs NO HotSpot -XX flags (it doesn't
-#                                     understand them). ActiveProcessorCount=1 keeps
-#                                     the scorer's Semaphore admitting one scan at a
-#                                     time on the 1-CPU budget.
+# Native Image configuration
 RUN mkdir -p /app; \
     native-image \
         --no-fallback \
         --gc=G1 \
-        -march=compatibility \
+        -march=native \
         --enable-native-access=ALL-UNNAMED \
         --add-modules=jdk.httpserver \
         -O3 \
-        -R:MaxHeapSize=48m \
-        -R:ActiveProcessorCount=1 \
+        -H:TuneInlinerExploration=1 \
+        -R:MaxHeapSize=64m \
         -jar app.jar \
         /app/rinha-app; \
     ls -la /app/rinha-app
@@ -117,12 +98,15 @@ COPY --from=build /app/references.bin /app/references.bin
 
 # The native binary reads these at runtime (System.getenv). NPROBE / SCAN_CAP
 # tune the IVF search (clusters probed per query / max records scanned); defaults
-# match brute-force decisions exactly while cutting per-query work ~50x. Heap and
-# processor count are baked into the binary (-R: flags above) — no JAVA_OPTS.
+# match brute-force decisions exactly while cutting per-query work ~50x. WORKERS
+# sizes the per-instance parse/scan pools — concurrent scans overlap memory
+# stalls within the 0.45 CPU quota (availableProcessors() is pinned to 1 by the
+# cgroup). Heap is baked into the binary (-R: flags above) — no JAVA_OPTS.
 ENV REFERENCES_BIN=/app/references.bin \
     PORT=8080 \
     NPROBE=24 \
-    SCAN_CAP=120000
+    SCAN_CAP=120000 \
+    WORKERS=4
 
 USER app
 EXPOSE 8080
