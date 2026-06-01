@@ -1,1 +1,14 @@
 target
+.jdk/
+
+# Large early-access JDK tarball (fetched by setup-jdk.sh)
+*.tar.gz
+
+# Large reference dataset artifacts (references.json.gz is fetched from the
+# upstream repo at image-build time; references.bin is generated from it).
+resources/references.json.gz
+resources/references.bin
+
+# Test harness data/results (test-data.json is 27MB; fetch via the upstream repo)
+test/test-data.json
+test/results.json

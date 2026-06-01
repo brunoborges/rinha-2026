@@ -1,0 +1,8 @@
+.git
+.jdk
+target
+test/test-data.json
+test/results.json
+*.tar.gz
+docs
+*.md
