@@ -35,15 +35,15 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; }
 
 stack_build() {
-    log "Building the API image (native-image; this also builds references.bin)…"
+    log "Building the API image (native-image; this also builds references.bin)..."
     $COMPOSE build
     log "Image built."
 }
 
 stack_up() {
-    log "Starting the stack (no rebuild; run 'build' first if source changed)…"
+    log "Starting the stack (no rebuild; run 'build' first if source changed)..."
     $COMPOSE up -d --wait --wait-timeout 300
-    log "Stack is up. Waiting for ${BASE_URL}/ready via the load balancer…"
+    log "Stack is up. Waiting for ${BASE_URL}/ready via the load balancer..."
     for i in $(seq 1 60); do
         if curl -fsS "${BASE_URL}/ready" >/dev/null 2>&1; then
             log "Load balancer is serving /ready (200)."
@@ -57,7 +57,7 @@ stack_up() {
 }
 
 stack_down() {
-    log "Tearing down the stack…"
+    log "Tearing down the stack..."
     $COMPOSE down -v --remove-orphans
 }
 
@@ -77,7 +77,7 @@ run_k6() {
     done
     cp "test/test-data.json" "${tmp}/test-data.json"
 
-    log "Running k6 ($script) against the stack…"
+    log "Running k6 ($script) against the stack..."
     local rc=0
     docker run --rm -i \
         --network "$NETWORK" \
