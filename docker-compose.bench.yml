@@ -1,0 +1,71 @@
+# Offline vector-search benchmark — NOT part of the submission.
+#
+# Runs ONE container (no load balancer, no HTTP) that replays the labelled
+# requests in test/test-data.json straight through the production IVF scan and
+# prints throughput + a latency distribution + the detection confusion matrix.
+# The point is to optimize the vector search in isolation under the FULL budget
+# the whole stack gets in the real eval:
+#
+#     bench  1.00 CPU / 350MB   (== nginx+api1+api2 combined)
+#
+# It reuses the exact same image as production (rinha-2026-api:latest); the
+# native binary dispatches to BenchmarkCli when BENCH=1 (see App.main), so the
+# AOT-compiled scan is what gets measured — a JVM harness would mislead because
+# native-image and HotSpot optimize the FFM/scan loop differently.
+#
+# Build the image first (from the main compose or directly):
+#     docker compose build api1            # produces rinha-2026-api:latest
+# Then run a benchmark (see scripts/run-bench.sh for a friendlier wrapper):
+#     docker compose -f docker-compose.bench.yml run --rm bench
+#
+# Tune via env, e.g.:
+#     BENCH_MODE=scan THREADS=4 NPROBE=8 \
+#       docker compose -f docker-compose.bench.yml run --rm bench
+
+services:
+  bench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rinha-2026-cli:latest
+    # Override the server ENTRYPOINT args are irrelevant; BENCH=1 makes the same
+    # binary run the benchmark and exit when done.
+    environment:
+      BENCH: "1"
+      TEST_DATA: "/app/test-data.json"
+      # references.bin is baked into the image at /app/references.bin (REFERENCES_BIN
+      # is already set there). Benchmark knobs — override on the CLI as needed:
+      BENCH_MODE: "${BENCH_MODE:-scan}"      # scan | score | full
+      BENCH_PASSES: "${BENCH_PASSES:-5}"
+      BENCH_LIMIT: "${BENCH_LIMIT:-0}"        # 0 = all entries
+      THREADS: "${THREADS:-4}"
+      EXECUTOR: "${EXECUTOR:-platform}"      # platform | virtual
+      WORKERS: "${WORKERS:-4}"
+      NPROBE: "${NPROBE:-8}"
+      MAX_NPROBE: "${MAX_NPROBE:-24}"
+      SCAN_CAP: "${SCAN_CAP:-120000}"
+      THROTTLE_STATS: "${THROTTLE_STATS:-auto}"  # auto = report CFS throttle counters when cpu-limited
+    volumes:
+      # The 27MB corpus is mounted read-only rather than baked into the image.
+      - ./test/test-data.json:/app/test-data.json:ro
+    networks:
+      - rinha-bench
+    # The image HEALTHCHECK curls /ready, which does not exist in benchmark mode;
+    # disable it so this run-to-completion container is never flagged unhealthy.
+    healthcheck:
+      disable: true
+    # Same total budget the full stack gets. deploy.resources.limits is honored by
+    # `docker compose`; cpus/mem_limit are the non-swarm equivalents, kept in sync
+    # so the cap is enforced regardless of how compose is invoked.
+    cpus: 1.0
+    mem_limit: 350m
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: "350MB"
+
+networks:
+  rinha-bench:
+    name: rinha-bench
+    driver: bridge

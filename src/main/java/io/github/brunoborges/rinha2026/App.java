@@ -121,6 +121,16 @@ public class App {
     }
 
     public static void main(String[] args) throws IOException {
+        // Offline benchmark dispatch: BENCH=1 (or `bench` as the first arg) runs the
+        // HTTP-free vector-search benchmark in this same (native) image instead of
+        // starting the server. Production never sets BENCH, so the server path is the
+        // default. Kept reachable from main() so native-image includes BenchmarkCli.
+        String bench = System.getenv("BENCH");
+        if ((bench != null && bench.trim().equals("1"))
+                || (args.length > 0 && "bench".equals(args[0]))) {
+            BenchmarkCli.run(args);
+            return;
+        }
         HttpServer server = new App().start(resolvePort(args));
         System.out.println("Listening on http://localhost:" + server.getAddress().getPort());
     }

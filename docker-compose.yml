@@ -4,10 +4,10 @@
 # no business logic. Total resource limits across ALL services are capped at
 # 1.0 CPU and 350MB:
 #
-#     nginx  0.10 CPU /  20MB
-#     api1   0.45 CPU / 165MB
-#     api2   0.45 CPU / 165MB
-#     -----  ----------------
+#     nginx  0.075 CPU /  16MB
+#     api1   0.4625 CPU / 167MB
+#     api2   0.4625 CPU / 167MB
+#     -----  -----------------
 #     total  1.00 CPU / 350MB
 #
 # Network mode is bridge (host mode is forbidden). The API image bakes in the
@@ -26,15 +26,16 @@ services:
     environment:
       PORT: "8080"
       SCORER: "${SCORER:-ivf}"
-      NPROBE: "${NPROBE:-8}"
-      WORKERS: "${WORKERS:-4}"
+      NPROBE: "${NPROBE:-6}"
+      MAX_NPROBE: "${MAX_NPROBE:-24}"
+      WORKERS: "${WORKERS:-1}"
     networks:
       - rinha-net
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "165MB"
+          cpus: "0.4625"
+          memory: "167MB"
 
   api2:
     image: rinha-2026-api:latest
@@ -43,15 +44,16 @@ services:
     environment:
       PORT: "8080"
       SCORER: "${SCORER:-ivf}"
-      NPROBE: "${NPROBE:-8}"
-      WORKERS: "${WORKERS:-4}"
+      NPROBE: "${NPROBE:-6}"
+      MAX_NPROBE: "${MAX_NPROBE:-24}"
+      WORKERS: "${WORKERS:-1}"
     networks:
       - rinha-net
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "165MB"
+          cpus: "0.4625"
+          memory: "167MB"
 
   nginx:
     image: nginx:1.27-alpine
@@ -69,8 +71,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "20MB"
+          cpus: "0.075"
+          memory: "16MB"
 
 networks:
   rinha-net:

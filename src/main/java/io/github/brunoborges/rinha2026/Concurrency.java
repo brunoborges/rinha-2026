@@ -7,12 +7,12 @@ import java.util.logging.Logger;
  * {@link RequestVectorParser} {@code State}).
  *
  * <p>These pools bound how many requests can be parsed/scanned concurrently per
- * instance. They were previously sized to {@link Runtime#availableProcessors()},
- * but under the {@code cpus=0.45} cgroup limit that value is always {@code 1}
- * (the quota rounds up to one), which serialized scoring even though the IVF
- * scan is memory-latency-bound and leaves the CPU mostly idle while stalled on
- * the mmap'd dataset. Allowing a few concurrent scans overlaps those stalls and
- * raises throughput without exceeding the CPU quota.
+ * instance. The default is a single worker: under the sub-1-CPU cgroup quota the
+ * IVF scan is the sole CPU-bound stage and already saturates the core, so adding
+ * workers cannot raise throughput &mdash; it only oversubscribes the one core and
+ * drives CFS throttling to 100% of periods, blowing the latency tail up by orders
+ * of magnitude (p99 ~0.7ms single-threaded vs ~60ms+ at 3+ workers) while p50 and
+ * throughput stay flat. Since the load is scored on p99, a single thread wins.
  *
  * <p>The {@code WORKERS} environment variable tunes this at runtime (no rebuild),
  * mirroring the {@code NPROBE}/{@code SCAN_CAP} knobs.
@@ -22,7 +22,7 @@ final class Concurrency {
     private static final Logger LOG = Logger.getLogger(Concurrency.class.getName());
 
     /** Default concurrent workers per instance when {@code WORKERS} is unset. */
-    static final int DEFAULT_WORKERS = 4;
+    static final int DEFAULT_WORKERS = 1;
 
     private Concurrency() {
     }

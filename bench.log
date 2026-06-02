@@ -1,0 +1,211 @@
+➜  rinha-2026 git:(main) ✗ ./scripts/run-bench.sh tsweep full
+==> concurrency sweep: THREADS=WORKERS=1, mode=full
+WARN[0000] Found orphan containers ([rinha-2026-nginx-1 rinha-2026-api2-1 rinha-2026-api1-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up. 
+Container rinha-2026-bench-run-056601b0bca5 Creating 
+Container rinha-2026-bench-run-056601b0bca5 Created 
+Jun 02, 2026 2:42:05 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=1
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 93 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 1   workers(pool)=1
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 95.069 s
+  throughput: 2,845 ops/s
+  mean      :   351.36 us
+  p50       :   357.67 us
+  p90       :   524.71 us
+  p99       :   738.25 us
+  p99.9     :  1777.17 us
+  max       : 46534.42 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 951
+  throttled     : 290  (30.5% of periods hit the quota wall)
+  throttled time: 599.6 ms total
+  avg stall     : 2.07 ms per throttled period
+
+==> concurrency sweep: THREADS=WORKERS=2, mode=full
+Container rinha-2026-bench-run-adc70dcb864f Creating 
+Container rinha-2026-bench-run-adc70dcb864f Created 
+Jun 02, 2026 2:44:20 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=2
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 100 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 2   workers(pool)=2
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 98.666 s
+  throughput: 2,742 ops/s
+  mean      :   729.16 us
+  p50       :   371.29 us
+  p90       :   558.50 us
+  p99       :  1183.25 us
+  p99.9     : 53766.83 us
+  max       : 86187.00 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 987
+  throttled     : 987  (100.0% of periods hit the quota wall)
+  throttled time: 98646.9 ms total
+  avg stall     : 99.95 ms per throttled period
+
+==> concurrency sweep: THREADS=WORKERS=3, mode=full
+Container rinha-2026-bench-run-7040e111c306 Creating 
+Container rinha-2026-bench-run-7040e111c306 Created 
+Jun 02, 2026 2:46:38 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=3
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 97 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 3   workers(pool)=3
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 97.877 s
+  throughput: 2,764 ops/s
+  mean      :  1084.18 us
+  p50       :   370.54 us
+  p90       :   557.79 us
+  p99       : 62994.21 us
+  p99.9     : 71036.88 us
+  max       : 79247.29 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 979
+  throttled     : 979  (100.0% of periods hit the quota wall)
+  throttled time: 195466.7 ms total
+  avg stall     : 199.66 ms per throttled period
+
+==> concurrency sweep: THREADS=WORKERS=4, mode=full
+Container rinha-2026-bench-run-36bb0f3fdaad Creating 
+Container rinha-2026-bench-run-36bb0f3fdaad Created 
+Jun 02, 2026 2:48:57 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=4
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 108 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 4   workers(pool)=4
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 102.682 s
+  throughput: 2,634 ops/s
+  mean      :  1517.40 us
+  p50       :   379.25 us
+  p90       :   612.08 us
+  p99       : 74055.33 us
+  p99.9     : 80597.00 us
+  max       : 101743.92 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 1027
+  throttled     : 1027  (100.0% of periods hit the quota wall)
+  throttled time: 306012.0 ms total
+  avg stall     : 297.97 ms per throttled period
+
+==> concurrency sweep: THREADS=WORKERS=6, mode=full
+Container rinha-2026-bench-run-93bc44f5537b Creating 
+Container rinha-2026-bench-run-93bc44f5537b Created 
+Jun 02, 2026 2:51:21 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=6
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 95 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 6   workers(pool)=6
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 98.852 s
+  throughput: 2,736 ops/s
+  mean      :  2190.07 us
+  p50       :   420.29 us
+  p90       :  3411.29 us
+  p99       : 61218.29 us
+  p99.9     : 74536.21 us
+  max       : 260391.58 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 988
+  throttled     : 988  (100.0% of periods hit the quota wall)
+  throttled time: 216964.6 ms total
+  avg stall     : 219.60 ms per throttled period
+
+==> concurrency sweep: THREADS=WORKERS=8, mode=full
+Container rinha-2026-bench-run-21ca0a486431 Creating 
+Container rinha-2026-bench-run-21ca0a486431 Created 
+Jun 02, 2026 2:53:39 PM io.github.brunoborges.rinha2026.IvfFraudScorer <init>
+INFO: IVF scorer: clusters=2048, nprobe=8, maxNprobe=24, refineBand=[2,4], scanCap=120000, scanThreads=8
+=== vector-search benchmark ===
+mode        : full
+dataset     : 3000000 vectors, 2048 clusters (mmapped in 106 ms)
+corpus      : 54100 requests from test-data.json
+passes      : 5  (total ops: 270500)
+threads     : 8   workers(pool)=8
+executor    : platform
+nprobe      : 8  max=24  scanCap=120000
+throttle    : on (cgroup v2)
+
+--- latency (per op) ---
+  count     : 270500 ops in 96.585 s
+  throughput: 2,801 ops/s
+  mean      :  2852.48 us
+  p50       :   437.92 us
+  p90       :  4323.38 us
+  p99       : 65120.71 us
+  p99.9     : 75210.38 us
+  max       : 109435.13 us
+
+--- detection (vs expected_approved) ---
+  TP=23954  TN=30137  FP=4  FN=5
+  accuracy  : 0.9998  (FP+FN=9 of 54100)
+
+--- cfs throttling (timed passes) ---
+  cfs periods   : 966
+  throttled     : 966  (100.0% of periods hit the quota wall)
+  throttled time: 214551.1 ms total
+  avg stall     : 222.10 ms per throttled period

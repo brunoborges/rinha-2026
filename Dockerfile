@@ -79,6 +79,8 @@ RUN mkdir -p /app; \
         --add-modules=jdk.httpserver \
         -O3 \
         -H:TuneInlinerExploration=1 \
+        -H:+UnlockExperimentalVMOptions \
+        -H:+SharedArenaSupport \
         -R:MaxHeapSize=64m \
         -jar app.jar \
         /app/rinha-app; \
@@ -96,17 +98,20 @@ WORKDIR /app
 COPY --from=native /app/rinha-app /app/rinha-app
 COPY --from=build /app/references.bin /app/references.bin
 
-# The native binary reads these at runtime (System.getenv). NPROBE / SCAN_CAP
-# tune the IVF search (clusters probed per query / max records scanned); defaults
-# match brute-force decisions exactly while cutting per-query work ~50x. WORKERS
-# sizes the per-instance parse/scan pools — concurrent scans overlap memory
-# stalls within the 0.45 CPU quota (availableProcessors() is pinned to 1 by the
-# cgroup). Heap is baked into the binary (-R: flags above) — no JAVA_OPTS.
+# The native binary reads these at runtime (System.getenv). NPROBE is the baseline
+# clusters probed per query; MAX_NPROBE is the cap used for adaptive refinement of
+# boundary queries (baseline fraud-count 2-4 of 5), which corrects most detection
+# errors while only ~3% of traffic pays the extra scan. SCAN_CAP bounds records
+# scanned. WORKERS sizes the per-instance parse/scan pools; defaults to 1 because
+# the IVF scan saturates the sub-1-CPU quota, so extra workers only oversubscribe
+# the core and drive CFS throttling to 100%, blowing up the p99 tail (the scored
+# metric). Heap is baked into the binary (-R: flags above) — no JAVA_OPTS.
 ENV REFERENCES_BIN=/app/references.bin \
     PORT=8080 \
-    NPROBE=24 \
+    NPROBE=6 \
+    MAX_NPROBE=24 \
     SCAN_CAP=120000 \
-    WORKERS=4
+    WORKERS=1
 
 USER app
 EXPOSE 8080
