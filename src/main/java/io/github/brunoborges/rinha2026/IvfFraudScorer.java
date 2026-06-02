@@ -264,6 +264,22 @@ public final class IvfFraudScorer implements FraudScorer {
         boolean[] bestFraud = s.bestFraud;
         int worstNeighbor = s.worstNeighbor;
         int scanned = s.scanned;
+        // DIMS is fixed at 14 in this challenge; keep query lanes in locals so the
+        // inner loop only loads candidates from buf.
+        int q0 = query[0];
+        int q1 = query[1];
+        int q2 = query[2];
+        int q3 = query[3];
+        int q4 = query[4];
+        int q5 = query[5];
+        int q6 = query[6];
+        int q7 = query[7];
+        int q8 = query[8];
+        int q9 = query[9];
+        int q10 = query[10];
+        int q11 = query[11];
+        int q12 = query[12];
+        int q13 = query[13];
         scan:
         for (int j = from; j < to; j++) {
             int c = cid[j];
@@ -277,11 +293,31 @@ public final class IvfFraudScorer implements FraudScorer {
                 int n = Math.min(Math.min(CHUNK, end - base), remaining);
                 dataset.copyVectorRange(base, n, buf, 0);
                 for (int t = 0; t < n; t++) {
-                    long d2 = squaredDistance(query, buf, t * DIMS);
+                    int off = t * DIMS;
+                    int a0 = q0 - buf[off];
+                    int a1 = q1 - buf[off + 1];
+                    int a2 = q2 - buf[off + 2];
+                    int a3 = q3 - buf[off + 3];
+                    int a4 = q4 - buf[off + 4];
+                    int a5 = q5 - buf[off + 5];
+                    int a6 = q6 - buf[off + 6];
+                    int a7 = q7 - buf[off + 7];
+                    int a8 = q8 - buf[off + 8];
+                    int a9 = q9 - buf[off + 9];
+                    int a10 = q10 - buf[off + 10];
+                    int a11 = q11 - buf[off + 11];
+                    int a12 = q12 - buf[off + 12];
+                    int a13 = q13 - buf[off + 13];
+
+                    long sum0 = (long) a0 * a0 + (long) a1 * a1 + (long) a2 * a2 + (long) a3 * a3;
+                    long sum1 = (long) a4 * a4 + (long) a5 * a5 + (long) a6 * a6 + (long) a7 * a7;
+                    long sum2 = (long) a8 * a8 + (long) a9 * a9 + (long) a10 * a10 + (long) a11 * a11;
+                    long sum3 = (long) a12 * a12 + (long) a13 * a13;
+                    long d2 = sum0 + sum1 + sum2 + sum3;
                     if (d2 < bestDist[worstNeighbor]) {
                         bestDist[worstNeighbor] = d2;
                         bestFraud[worstNeighbor] = dataset.isFraud(base + t);
-                        worstNeighbor = indexOfMax(bestDist, k);
+                        worstNeighbor = indexOfMaxTopK(bestDist, k);
                     }
                 }
                 scanned += n;
@@ -342,24 +378,6 @@ public final class IvfFraudScorer implements FraudScorer {
         }
     }
 
-    /**
-     * Squared Euclidean distance (quantized units) between {@code query} and the
-     * vector packed at {@code off} in a heap buffer. Reads the candidate from a
-     * plain {@code short[]} rather than via per-element off-heap FFM access. Two
-     * accumulators break the dependency chain so the multiply-adds pipeline.
-     */
-    private static long squaredDistance(short[] query, short[] buf, int off) {
-        long sum0 = 0;
-        long sum1 = 0;
-        for (int d = 0; d < DIMS; d += 2) {
-            int a = query[d] - buf[off + d];
-            int b = query[d + 1] - buf[off + d + 1];
-            sum0 += (long) a * a;
-            sum1 += (long) b * b;
-        }
-        return sum0 + sum1;
-    }
-
     /** Insertion sort of the first {@code len} (distance, clusterId) pairs by ascending distance. */
     private static void sortByDistance(long[] dist, int[] id, int len) {
         for (int i = 1; i < len; i++) {
@@ -384,6 +402,27 @@ public final class IvfFraudScorer implements FraudScorer {
             }
         }
         return max;
+    }
+
+    /**
+     * Top-k heap here is effectively fixed at 5. Keep a tiny specialized fast
+     * path for the per-candidate hot loop, with fallback for tests/smaller sets.
+     */
+    private static int indexOfMaxTopK(long[] values, int len) {
+        if (len == 5) {
+            int max = values[1] > values[0] ? 1 : 0;
+            if (values[2] > values[max]) {
+                max = 2;
+            }
+            if (values[3] > values[max]) {
+                max = 3;
+            }
+            if (values[4] > values[max]) {
+                max = 4;
+            }
+            return max;
+        }
+        return indexOfMax(values, len);
     }
 
     private static int resolveInt(String envVar, int defaultValue) {
