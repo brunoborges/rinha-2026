@@ -36,6 +36,16 @@
   </dependencyManagement>
 
   <dependencies>
+    <!-- GraalVM SDK (build-time only): ForeignDowncallFeature uses the hosted
+         Feature + RuntimeForeignAccess API to register the FFM downcalls used by
+         LinuxSyscalls. `provided` so it compiles but is never bundled/at runtime
+         (the native-image builder supplies these classes at image-build time). -->
+    <dependency>
+      <groupId>org.graalvm.sdk</groupId>
+      <artifactId>nativeimage</artifactId>
+      <version>25.0.3</version>
+      <scope>provided</scope>
+    </dependency>
     <!-- jackson-core: reflection-free streaming parser used for the reference
          dataset and the request reader. Safe for GraalVM Native Image. -->
     <dependency>

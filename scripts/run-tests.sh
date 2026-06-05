@@ -2,11 +2,11 @@
 #
 # Local test harness for Rinha de Backend 2026 (see docs/EVALUATION.md).
 #
-# Brings up the deployable stack (nginx + 2 API instances, 1 CPU / 350MB total)
+# Brings up the deployable stack (FD-passing LB + 2 API instances, 1 CPU / 350MB total)
 # and runs the OFFICIAL k6 scripts from ./test against it. To stay reliable on
 # both Linux and Docker Desktop (Mac), k6 runs as a container attached to the
-# stack's bridge network and targets the `nginx` service by name — so the
-# upstream test scripts are used unmodified except for the localhost->nginx host
+# stack's bridge network and targets the `lb` service by name — so the
+# upstream test scripts are used unmodified except for the localhost->lb host
 # rewrite (their logic, payloads and scoring are untouched).
 #
 # Usage:
@@ -61,7 +61,7 @@ stack_down() {
     $COMPOSE down -v --remove-orphans
 }
 
-# Run a k6 script from ./test against the nginx service on the stack network.
+# Run a k6 script from ./test against the lb service on the stack network.
 # $1 = script filename (test.js | smoke.js)
 run_k6() {
     local script="$1"
@@ -73,9 +73,15 @@ run_k6() {
     # in-network service name, plus the dataset (single mount avoids Docker
     # Desktop's "mountpoint outside rootfs" error from nested file binds).
     for f in "$script" k6-summary.js; do
-        sed 's#http://localhost:9999#http://nginx:9999#g' "test/$f" > "${tmp}/$f"
+        sed 's#http://localhost:9999#http://lb:9999#g' "test/$f" > "${tmp}/$f"
     done
     cp "test/test-data.json" "${tmp}/test-data.json"
+
+    # The grafana/k6 image runs as a non-root user (uid 12345); mktemp -d is 0700
+    # owned by the host user, so make the ephemeral tree world-traversable/writable
+    # (it is rm -rf'd below) or the container cannot stat the scripts or write
+    # results.json.
+    chmod -R a+rwX "$tmp"
 
     log "Running k6 ($script) against the stack..."
     local rc=0

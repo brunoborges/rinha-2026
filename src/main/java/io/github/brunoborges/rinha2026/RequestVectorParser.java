@@ -80,7 +80,28 @@ final class RequestVectorParser {
      * (mapped to {@code HTTP 400}) for malformed JSON, a non-object root, a wrong
      * section shape, a missing required section, or a missing/invalid timestamp.
      */
+    /** A fresh reusable {@link State}; callers that own a single event-loop thread keep one and skip the pool. */
+    State newState() {
+        return new State();
+    }
+
     void vectorize(InputStream in, State s) throws IOException {
+        try (JsonParser p = factory.createParser(in)) {
+            parseAndVectorize(p, s);
+        }
+    }
+
+    /**
+     * Zero-copy hot-path overload: parses the request body straight out of a slice of the NIO read
+     * buffer ({@code data[off .. off+len)}) without wrapping it in an {@link InputStream}.
+     */
+    void vectorize(byte[] data, int off, int len, State s) throws IOException {
+        try (JsonParser p = factory.createParser(data, off, len)) {
+            parseAndVectorize(p, s);
+        }
+    }
+
+    private void parseAndVectorize(JsonParser p, State s) throws IOException {
         boolean hasId = false;
         boolean hasTx = false;
         boolean hasCustomer = false;
@@ -104,116 +125,114 @@ final class RequestVectorParser {
         long lastEpoch = 0;
         double lastKm = 0;
 
-        try (JsonParser p = factory.createParser(in)) {
-            if (p.nextToken() != JsonToken.START_OBJECT) {
-                throw new IOException("request body must be a JSON object");
-            }
-            while (p.nextToken() != JsonToken.END_OBJECT) {
-                String field = p.currentName();
-                JsonToken v = p.nextToken();
-                switch (field) {
-                    case "id" -> {
-                        if (v == JsonToken.START_OBJECT || v == JsonToken.START_ARRAY) {
-                            p.skipChildren();
-                        } else if (v != JsonToken.VALUE_NULL) {
-                            hasId = true;
-                        }
+        if (p.nextToken() != JsonToken.START_OBJECT) {
+            throw new IOException("request body must be a JSON object");
+        }
+        while (p.nextToken() != JsonToken.END_OBJECT) {
+            String field = p.currentName();
+            JsonToken v = p.nextToken();
+            switch (field) {
+                case "id" -> {
+                    if (v == JsonToken.START_OBJECT || v == JsonToken.START_ARRAY) {
+                        p.skipChildren();
+                    } else if (v != JsonToken.VALUE_NULL) {
+                        hasId = true;
                     }
-                    case "transaction" -> {
-                        if (v == JsonToken.VALUE_NULL) {
-                            continue;
-                        }
-                        expectObject(v);
-                        hasTx = true;
-                        while (p.nextToken() != JsonToken.END_OBJECT) {
-                            String f = p.currentName();
-                            JsonToken tv = p.nextToken();
-                            switch (f) {
-                                case "amount" -> amount = p.getValueAsDouble();
-                                case "installments" -> installments = p.getValueAsInt();
-                                case "requested_at" -> {
-                                    if (tv != JsonToken.VALUE_NULL) {
-                                        requestedEpoch = epochSeconds(p);
-                                        hasRequestedAt = true;
-                                    }
-                                }
-                                default -> p.skipChildren();
-                            }
-                        }
-                    }
-                    case "customer" -> {
-                        if (v == JsonToken.VALUE_NULL) {
-                            continue;
-                        }
-                        expectObject(v);
-                        hasCustomer = true;
-                        while (p.nextToken() != JsonToken.END_OBJECT) {
-                            String f = p.currentName();
-                            JsonToken cv = p.nextToken();
-                            switch (f) {
-                                case "avg_amount" -> custAvg = p.getValueAsDouble();
-                                case "tx_count_24h" -> txCount24h = p.getValueAsInt();
-                                case "known_merchants" -> readKnownMerchants(p, cv, s);
-                                default -> p.skipChildren();
-                            }
-                        }
-                    }
-                    case "merchant" -> {
-                        if (v == JsonToken.VALUE_NULL) {
-                            continue;
-                        }
-                        expectObject(v);
-                        hasMerchant = true;
-                        while (p.nextToken() != JsonToken.END_OBJECT) {
-                            String f = p.currentName();
-                            JsonToken mv = p.nextToken();
-                            switch (f) {
-                                case "id" -> merchantId = (mv == JsonToken.VALUE_NULL) ? null : p.getText();
-                                case "mcc" -> mcc = (mv == JsonToken.VALUE_NULL) ? null : p.getText();
-                                case "avg_amount" -> merchantAvg = p.getValueAsDouble();
-                                default -> p.skipChildren();
-                            }
-                        }
-                    }
-                    case "terminal" -> {
-                        if (v == JsonToken.VALUE_NULL) {
-                            continue;
-                        }
-                        expectObject(v);
-                        hasTerminal = true;
-                        while (p.nextToken() != JsonToken.END_OBJECT) {
-                            String f = p.currentName();
-                            p.nextToken();
-                            switch (f) {
-                                case "is_online" -> isOnline = p.getValueAsBoolean();
-                                case "card_present" -> cardPresent = p.getValueAsBoolean();
-                                case "km_from_home" -> kmFromHome = p.getValueAsDouble();
-                                default -> p.skipChildren();
-                            }
-                        }
-                    }
-                    case "last_transaction" -> {
-                        if (v == JsonToken.VALUE_NULL) {
-                            continue;
-                        }
-                        expectObject(v);
-                        hasLast = true;
-                        while (p.nextToken() != JsonToken.END_OBJECT) {
-                            String f = p.currentName();
-                            JsonToken lv = p.nextToken();
-                            switch (f) {
-                                case "timestamp" -> {
-                                    if (lv != JsonToken.VALUE_NULL) {
-                                        lastEpoch = epochSeconds(p);
-                                    }
-                                }
-                                case "km_from_current" -> lastKm = p.getValueAsDouble();
-                                default -> p.skipChildren();
-                            }
-                        }
-                    }
-                    default -> p.skipChildren();
                 }
+                case "transaction" -> {
+                    if (v == JsonToken.VALUE_NULL) {
+                        continue;
+                    }
+                    expectObject(v);
+                    hasTx = true;
+                    while (p.nextToken() != JsonToken.END_OBJECT) {
+                        String f = p.currentName();
+                        JsonToken tv = p.nextToken();
+                        switch (f) {
+                            case "amount" -> amount = p.getValueAsDouble();
+                            case "installments" -> installments = p.getValueAsInt();
+                            case "requested_at" -> {
+                                if (tv != JsonToken.VALUE_NULL) {
+                                    requestedEpoch = epochSeconds(p);
+                                    hasRequestedAt = true;
+                                }
+                            }
+                            default -> p.skipChildren();
+                        }
+                    }
+                }
+                case "customer" -> {
+                    if (v == JsonToken.VALUE_NULL) {
+                        continue;
+                    }
+                    expectObject(v);
+                    hasCustomer = true;
+                    while (p.nextToken() != JsonToken.END_OBJECT) {
+                        String f = p.currentName();
+                        JsonToken cv = p.nextToken();
+                        switch (f) {
+                            case "avg_amount" -> custAvg = p.getValueAsDouble();
+                            case "tx_count_24h" -> txCount24h = p.getValueAsInt();
+                            case "known_merchants" -> readKnownMerchants(p, cv, s);
+                            default -> p.skipChildren();
+                        }
+                    }
+                }
+                case "merchant" -> {
+                    if (v == JsonToken.VALUE_NULL) {
+                        continue;
+                    }
+                    expectObject(v);
+                    hasMerchant = true;
+                    while (p.nextToken() != JsonToken.END_OBJECT) {
+                        String f = p.currentName();
+                        JsonToken mv = p.nextToken();
+                        switch (f) {
+                            case "id" -> merchantId = (mv == JsonToken.VALUE_NULL) ? null : p.getText();
+                            case "mcc" -> mcc = (mv == JsonToken.VALUE_NULL) ? null : p.getText();
+                            case "avg_amount" -> merchantAvg = p.getValueAsDouble();
+                            default -> p.skipChildren();
+                        }
+                    }
+                }
+                case "terminal" -> {
+                    if (v == JsonToken.VALUE_NULL) {
+                        continue;
+                    }
+                    expectObject(v);
+                    hasTerminal = true;
+                    while (p.nextToken() != JsonToken.END_OBJECT) {
+                        String f = p.currentName();
+                        p.nextToken();
+                        switch (f) {
+                            case "is_online" -> isOnline = p.getValueAsBoolean();
+                            case "card_present" -> cardPresent = p.getValueAsBoolean();
+                            case "km_from_home" -> kmFromHome = p.getValueAsDouble();
+                            default -> p.skipChildren();
+                        }
+                    }
+                }
+                case "last_transaction" -> {
+                    if (v == JsonToken.VALUE_NULL) {
+                        continue;
+                    }
+                    expectObject(v);
+                    hasLast = true;
+                    while (p.nextToken() != JsonToken.END_OBJECT) {
+                        String f = p.currentName();
+                        JsonToken lv = p.nextToken();
+                        switch (f) {
+                            case "timestamp" -> {
+                                if (lv != JsonToken.VALUE_NULL) {
+                                    lastEpoch = epochSeconds(p);
+                                }
+                            }
+                            case "km_from_current" -> lastKm = p.getValueAsDouble();
+                            default -> p.skipChildren();
+                        }
+                    }
+                }
+                default -> p.skipChildren();
             }
         }
 

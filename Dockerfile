@@ -1,58 +1,50 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Rinha de Backend 2026 — fraud-scoring API (GraalVM 25 Native Image)
+# Rinha de Backend 2026 — fraud-scoring API (HotSpot JDK 25 + AOT cache)
 #
-# Three-stage build:
-#   1. build    — maven + Temurin JDK 25 (Debian). Compile the shaded jar,
-#                 download the 3M reference dataset and pre-build the off-heap
-#                 int16 IVF `references.bin`.
-#   2. native   — GraalVM 25 native-image. Ahead-of-time compile the jar into a
-#                 standalone native executable (NO network here: Oracle Linux's
-#                 OpenSSL breaks `curl`, but native-image needs no downloads).
-#   3. runtime  — Oracle Linux 10 slim (glibc matches the GraalVM builder) + the
-#                 native binary + references.bin. No JDK, no JIT warmup.
+# Runtime migrated from GraalVM native-image to HotSpot Temurin JDK 25 with the
+# JDK 25 AOT cache (Project Leyden: JEP 483 class load/link + JEP 515 method
+# profiling). Rationale (see plan.md Phase 2/3): an offline experiment proved the
+# KD-tree index gives no candidate-count advantage over our IVF for this 14-dim
+# data — both need ~27k candidate evals to reach single-digit detection error.
+# The competitor's 1.441 ms p99 comes from the RUNTIME, not the index: C2's
+# auto-vectorized (AVX2) int16 distance kernel + the AOT cache removing most JIT
+# warmup + jemalloc + JVM tuning. This image adopts that runtime while keeping
+# our proven IVF index and FFM epoll fd-passing server (FFM is standard on
+# HotSpot; no GraalVM Feature needed).
 #
-# Why native image: the eval starts containers cold and scores p99 hard. AOT
-# removes JIT warmup entirely (the server runs at full speed immediately), so all
-# the previous warmup code is gone — the only pre-serving step left is faulting
-# the mmap'd dataset into the page cache (App.preload), an OS concern AOT does
-# NOT solve.
+# Four stages:
+#   1. build       — maven + Temurin 25: shaded jar + off-heap int16 IVF references.bin.
+#   2. aot-record  — run the scoring hot path (AOT_TRAINING) under -XX:AOTMode=record.
+#   3. aot-create  — assemble the AOT cache (-XX:AOTMode=create) from the recorded config.
+#   4. runtime     — Temurin 25 JRE-ish + jemalloc + jar + references.bin + app.aot.
 #
-# The dataset is converted at BUILD time (docs/EVALUATION.md: "the more
-# processing you move outside of runtime, the better your p99"). Nothing parses
-# the dataset JSON at runtime; request parsing is reflection-free jackson-core
-# streaming, so the native image needs no reachability metadata.
+# The AOT cache is keyed on the JVM flags, classpath and jar: JVM_FLAGS MUST be
+# byte-identical across record, create and the runtime ENTRYPOINT or the cache is
+# silently ignored (cold JIT). They are all driven from the single ARG below.
 # =============================================================================
 
+# Conservative, cgroup-aware defaults (167 MB / 0.4625 CPU per instance). We do
+# NOT copy the competitor's -Xms65m/AlwaysPreTouch/THP bundle blindly: with the
+# 84 MB mmap'd dataset that risks OOM on a 167 MB limit. Tune on the VM via the
+# JVM_FLAGS build-arg (and the runtime can disable AOT for an A/B by overriding
+# AOT_FLAGS="" — flags otherwise identical).
+ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx48m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
+
 # ---- 1. build stage: shaded jar + IVF references.bin ------------------------
-# Debian-based: its curl/TLS works (unlike the Oracle Linux GraalVM image), and
-# mvn resolves dependencies over Java's own TLS stack.
 FROM maven:3.9-eclipse-temurin-25 AS build
 
-# Public mirror of the 3,000,000-record labelled reference dataset.
 ARG REFERENCES_URL=https://raw.githubusercontent.com/brunoborges/rinha-de-backend-2026/main/resources/references.json.gz
 
 WORKDIR /src
-
-# Maven config first (better layer caching for dependency resolution).
 COPY .mvn ./.mvn
 COPY mvnw pom.xml ./
-
-# Warm the dependency cache.
 RUN mvn -B -q dependency:go-offline || true
-
 COPY src ./src
-
-# Build the shaded jar. databind/jsr310 are test-scoped, so the jar is
-# reflection-free (only jackson-core streaming + jackson-annotations). Tests run
-# on the host; skip them here.
 RUN mvn -B -DskipTests package
 
-# Pre-build the binary reference dataset (offline JSON -> off-heap int16 .bin)
-# WITH an IVF (inverted-file) ANN index baked in (version-2 format): k-means
-# clusters the 3M vectors so each query scans only a few clusters at runtime
-# instead of the whole dataset. Runs on all build cores; runtime stays at 1 CPU.
+# Pre-build the off-heap int16 IVF references.bin (offline; runtime never parses JSON).
 RUN set -eux; \
     curl -fSL -o /tmp/references.json.gz "$REFERENCES_URL"; \
     mkdir -p /app; \
@@ -61,62 +53,75 @@ RUN set -eux; \
         io.github.brunoborges.rinha2026.ReferenceConverter \
         /tmp/references.json.gz /app/references.bin; \
     rm -f /tmp/references.json.gz; \
-    ls -la /app/references.bin
+    cp target/rinha-2026-1.0-SNAPSHOT.jar /app/app.jar; \
+    ls -la /app/references.bin /app/app.jar
 
-# ---- 2. native stage: ahead-of-time compile ---------------------------------
-FROM container-registry.oracle.com/graalvm/native-image:25 AS native
-
-WORKDIR /src
-COPY --from=build /src/target/rinha-2026-1.0-SNAPSHOT.jar ./app.jar
-
-# Native Image configuration
-RUN mkdir -p /app; \
-    native-image \
-        --no-fallback \
-        --gc=G1 \
-        -march=native \
-        --enable-native-access=ALL-UNNAMED \
-        --add-modules=jdk.httpserver \
-        -O3 \
-        -H:TuneInlinerExploration=1 \
-        -H:+UnlockExperimentalVMOptions \
-        -H:+SharedArenaSupport \
-        -R:MaxHeapSize=64m \
-        -jar app.jar \
-        /app/rinha-app; \
-    ls -la /app/rinha-app
-
-# ---- 3. runtime stage -------------------------------------------------------
-# Oracle Linux 10 slim: same glibc family as the GraalVM 25 builder, so the
-# dynamically-linked native binary loads cleanly (a Debian/distroless base can
-# carry an older glibc and fail with GLIBC_x.y not found).
-FROM container-registry.oracle.com/os/oraclelinux:10-slim AS runtime
-
-RUN useradd --system --uid 10001 --no-create-home app
-
+# ---- 2. aot-record: capture classes + method profiles -----------------------
+FROM eclipse-temurin:25-jdk AS aot-record
+ARG JVM_FLAGS
 WORKDIR /app
-COPY --from=native /app/rinha-app /app/rinha-app
+COPY --from=build /app/app.jar /app/app.jar
 COPY --from=build /app/references.bin /app/references.bin
 
-# The native binary reads these at runtime (System.getenv). NPROBE is the baseline
-# clusters probed per query; MAX_NPROBE is the cap used for adaptive refinement of
-# boundary queries (baseline fraud-count 2-4 of 5), which corrects most detection
-# errors while only ~3% of traffic pays the extra scan. SCAN_CAP bounds records
-# scanned. WORKERS sizes the per-instance parse/scan pools; defaults to 1 because
-# the IVF scan saturates the sub-1-CPU quota, so extra workers only oversubscribe
-# the core and drive CFS throttling to 100%, blowing up the p99 tail (the scored
-# metric). Heap is baked into the binary (-R: flags above) — no JAVA_OPTS.
+# Drive the real scoring hot path with synthetic requests, then exit. The JVM
+# records loaded/linked classes and method profiles into app.aotconf.
+RUN AOT_TRAINING=1 REFERENCES_BIN=/app/references.bin \
+    java $JVM_FLAGS \
+        -XX:AOTMode=record \
+        -XX:AOTConfiguration=/app/app.aotconf \
+        -jar /app/app.jar; \
+    ls -la /app/app.aotconf
+
+# ---- 3. aot-create: assemble the AOT cache ----------------------------------
+FROM eclipse-temurin:25-jdk AS aot-create
+ARG JVM_FLAGS
+WORKDIR /app
+COPY --from=build /app/app.jar /app/app.jar
+COPY --from=aot-record /app/app.aotconf /app/app.aotconf
+
+RUN java $JVM_FLAGS \
+        -XX:AOTMode=create \
+        -XX:AOTConfiguration=/app/app.aotconf \
+        -XX:AOTCache=/app/app.aot \
+        -jar /app/app.jar; \
+    ls -la /app/app.aot
+
+# ---- 4. runtime stage -------------------------------------------------------
+FROM eclipse-temurin:25-jdk AS runtime
+ARG JVM_FLAGS
+
+# jemalloc: the competitor preloads it (MALLOC_ARENA_MAX=1) to curb glibc arena
+# fragmentation under the tiny memory budget.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libjemalloc2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home app
+
+WORKDIR /app
+COPY --from=build /app/app.jar /app/app.jar
+COPY --from=build /app/references.bin /app/references.bin
+COPY --from=aot-create /app/app.aot /app/app.aot
+
+RUN mkdir -p /sockets && chown app:app /sockets
+
+# JVM_FLAGS must match the record/create runs for the AOT cache to load. AOT_FLAGS
+# is split out so an A/B run can disable the cache (AOT_FLAGS="") without changing
+# the rest. The fd-passing server binds NO TCP port (the Rust LB owns :9999).
 ENV REFERENCES_BIN=/app/references.bin \
-    PORT=8080 \
+    FD_SOCKET=/sockets/api.sock \
+    READY_FILE=/tmp/rinha-ready \
     NPROBE=6 \
     MAX_NPROBE=24 \
     SCAN_CAP=120000 \
-    WORKERS=1
+    WORKERS=1 \
+    JVM_FLAGS="${JVM_FLAGS}" \
+    AOT_FLAGS="-XX:AOTCache=/app/app.aot -Xlog:aot=info" \
+    LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \
+    MALLOC_ARENA_MAX=1
 
 USER app
-EXPOSE 8080
 
 HEALTHCHECK --interval=5s --timeout=3s --start-period=30s --retries=20 \
-    CMD curl -fsS "http://localhost:${PORT}/ready" || exit 1
+    CMD test -f "${READY_FILE}" || exit 1
 
-ENTRYPOINT ["/app/rinha-app"]
+ENTRYPOINT ["sh", "-c", "exec java $JVM_FLAGS $AOT_FLAGS -jar /app/app.jar"]

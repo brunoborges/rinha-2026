@@ -1,23 +1,20 @@
 package io.github.brunoborges.rinha2026;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
-
 import java.io.IOException;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.Executors;
 import java.util.logging.Logger;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-
 /**
- * Embedded HTTP server exposing the fraud-scoring API for Rinha de Backend 2026.
+ * Fraud-scoring API for Rinha de Backend 2026.
+ *
+ * <p>This process does <em>not</em> bind a public TCP port. The Rust load balancer (lapada-style) owns
+ * {@code :9999}, accepts every client connection, and hands the accepted socket file descriptor to this
+ * process over a Unix control socket via {@code SCM_RIGHTS}. {@link FdEpollServer} then serves the
+ * request directly on that fd — the balancer is never on the data path.
  *
  * <ul>
- *   <li>{@code GET /ready} &mdash; readiness probe, returns 200 when serving.</li>
+ *   <li>{@code GET /ready} &mdash; readiness probe, returns 200 once the dataset is faulted in.</li>
  *   <li>{@code POST /fraud-score} &mdash; scores a transaction for fraud.</li>
  * </ul>
  */
@@ -25,18 +22,19 @@ public class App {
 
     private static final Logger LOG = Logger.getLogger(App.class.getName());
 
-    private static final int DEFAULT_PORT = 9999;
-
     /** Default location of the pre-built binary reference dataset. */
     private static final String DEFAULT_REFERENCES_BIN = "resources/references.bin";
 
     /** Default location of the JSON reference dataset (fallback). */
     private static final String DEFAULT_REFERENCES_FILE = "resources/references.json.gz";
 
-    private static final byte[] READY_BODY = "{\"status\":\"ready\"}".getBytes(UTF_8);
+    /** Default Unix control socket this instance binds to receive client fds from the load balancer. */
+    private static final String DEFAULT_FD_SOCKET = "/sockets/api.sock";
+
+    /** Default readiness marker file the container healthcheck waits on. */
+    private static final String DEFAULT_READY_FILE = "/tmp/rinha-ready";
 
     private final FraudScorer scorer;
-    private final RequestVectorParser parser;
 
     public App() {
         this(loadDefaultScorer());
@@ -44,23 +42,57 @@ public class App {
 
     public App(FraudScorer scorer) {
         this.scorer = scorer;
-        this.parser = scorer.supportsVectorInput()
-                ? new RequestVectorParser(scorer.vectorizer())
-                : null;
+    }
+
+    public static void main(String[] args) throws Exception {
+        // Offline benchmark dispatch: BENCH=1 (or `bench` as the first arg) runs the HTTP-free
+        // vector-search benchmark in this same image instead of starting the server.
+        String bench = System.getenv("BENCH");
+        if ((bench != null && bench.trim().equals("1"))
+                || (args.length > 0 && "bench".equals(args[0]))) {
+            BenchmarkCli.run(args);
+            return;
+        }
+        // AOT cache training (-XX:AOTMode=record): drive the scoring hot path with synthetic
+        // requests, then exit, so the JVM records production classes + method profiles.
+        String train = System.getenv("AOT_TRAINING");
+        if ((train != null && train.trim().equals("1"))
+                || (args.length > 0 && "train".equals(args[0]))) {
+            TrainingDriver.run();
+            return;
+        }
+        new App().serve();
+        // The epoll loop runs on a non-daemon thread; main can return while it keeps serving.
     }
 
     /**
-     * Builds the production scorer backed by the reference dataset. Prefers a
-     * pre-built, memory-mapped {@code .bin} (off-heap, shared across instances);
-     * falls back to streaming the JSON dataset, and finally to
-     * {@link StubFraudScorer} (with a loud warning) so the server still starts in
-     * development and tests.
+     * Starts the fd-passing server: faults the dataset into the page cache, binds the Unix control
+     * socket, then publishes the readiness marker so the load balancer and healthcheck proceed.
      */
-    private static FraudScorer loadDefaultScorer() {
-        // Diagnostic override for bottleneck attribution (see
-        // VectorizeOnlyFraudScorer): SCORER=stub isolates the HTTP/parse/serialize
-        // path, SCORER=vectorize adds feature extraction, default/ivf is the full
-        // search. Only honoured when explicitly set.
+    public void serve() throws Exception {
+        preload();
+
+        HttpRouter router = new HttpRouter(scorer);
+
+        String socketPath = env("FD_SOCKET", DEFAULT_FD_SOCKET);
+        FdEpollServer server = new FdEpollServer(socketPath, router);
+        server.start(); // blocks until the control socket is bound and listening
+
+        router.markReady();
+        writeReadyFile();
+        LOG.info(() -> "Serving fraud-score API; control socket " + socketPath);
+    }
+
+    /**
+     * Builds the production scorer backed by the reference dataset. Prefers a pre-built, memory-mapped
+     * {@code .bin} (off-heap, shared across instances); falls back to streaming the JSON dataset, and
+     * finally to {@link StubFraudScorer} (with a loud warning) so the server still starts in development
+     * and tests.
+     */
+    static FraudScorer loadDefaultScorer() {
+        // Diagnostic override for bottleneck attribution (see VectorizeOnlyFraudScorer): SCORER=stub
+        // isolates the HTTP/parse/serialize path, SCORER=vectorize adds feature extraction, default/ivf
+        // is the full search. Only honoured when explicitly set.
         String mode = System.getenv("SCORER");
         if (mode != null) {
             mode = mode.trim().toLowerCase();
@@ -115,52 +147,14 @@ public class App {
         return new StubFraudScorer();
     }
 
-    private static Path resolvePath(String envVar, String defaultPath) {
-        String configured = System.getenv(envVar);
-        return Path.of(configured != null && !configured.isBlank() ? configured.trim() : defaultPath);
-    }
-
-    public static void main(String[] args) throws IOException {
-        // Offline benchmark dispatch: BENCH=1 (or `bench` as the first arg) runs the
-        // HTTP-free vector-search benchmark in this same (native) image instead of
-        // starting the server. Production never sets BENCH, so the server path is the
-        // default. Kept reachable from main() so native-image includes BenchmarkCli.
-        String bench = System.getenv("BENCH");
-        if ((bench != null && bench.trim().equals("1"))
-                || (args.length > 0 && "bench".equals(args[0]))) {
-            BenchmarkCli.run(args);
-            return;
-        }
-        HttpServer server = new App().start(resolvePort(args));
-        System.out.println("Listening on http://localhost:" + server.getAddress().getPort());
-    }
-
     /**
-     * Creates and starts the HTTP server.
+     * Page-faults the entire memory-mapped reference dataset into the OS page cache before readiness is
+     * published. The eval starts containers cold; without this the first live requests pay major page
+     * faults synchronously on a single CPU, backing up the queue into an error storm.
      *
-     * @param port the TCP port to bind, or {@code 0} for an ephemeral port
-     * @return the running {@link HttpServer}
-     */
-    public HttpServer start(int port) throws IOException {
-        preload();
-        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/ready", this::handleReady);
-        server.createContext("/fraud-score", this::handleFraudScore);
-        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        server.start();
-        return server;
-    }
-
-    /**
-     * Page-faults the entire memory-mapped reference dataset into the OS page
-     * cache before the port opens. The eval starts containers cold; without this
-     * the first live requests pay major page faults synchronously on a single CPU,
-     * backing up the queue into an error storm.
-     *
-     * <p>This is the only pre-serving work needed: compiled ahead-of-time as a
-     * GraalVM Native Image there is no JIT to warm, so the previous scan-loop
-     * warmup is gone. Failures are logged and swallowed so a hiccup never prevents
-     * the server from starting.
+     * <p>This is the only pre-serving work needed: compiled ahead-of-time as a GraalVM Native Image there
+     * is no JIT to warm. Failures are logged and swallowed so a hiccup never prevents the server from
+     * starting.
      */
     private void preload() {
         try {
@@ -173,161 +167,22 @@ public class App {
         }
     }
 
-    private void handleReady(HttpExchange exchange) throws IOException {
+    private void writeReadyFile() {
+        String path = env("READY_FILE", DEFAULT_READY_FILE);
         try {
-            if (!"GET".equals(exchange.getRequestMethod())) {
-                sendError(exchange, 405, "method not allowed");
-                return;
-            }
-            send(exchange, 200, READY_BODY);
-        } finally {
-            exchange.close();
-        }
-    }
-
-    private void handleFraudScore(HttpExchange exchange) throws IOException {
-        try {
-            if (!"POST".equals(exchange.getRequestMethod())) {
-                sendError(exchange, 405, "method not allowed");
-                return;
-            }
-            if (parser != null) {
-                scoreStreaming(exchange);
-            } else {
-                scoreFromRecord(exchange);
-            }
-        } finally {
-            exchange.close();
-        }
-    }
-
-    /**
-     * Hot path: parse the body straight into a pooled feature vector and score it,
-     * allocating no {@link FraudRequest} graph. Any malformed input (bad JSON,
-     * missing required section, invalid timestamp) surfaces as an
-     * {@link IOException} and is reported as {@code HTTP 400}, matching the
-     * record path's rejection behaviour.
-     */
-    private void scoreStreaming(HttpExchange exchange) throws IOException {
-        RequestVectorParser.State st = parser.acquire();
-        FraudResponse response;
-        try {
-            parser.vectorize(exchange.getRequestBody(), st);
-            response = scorer.scoreVector(st.qvec);
+            Files.writeString(Path.of(path), "ready");
         } catch (IOException e) {
-            sendError(exchange, 400, e.getMessage());
-            return;
-        } finally {
-            // qvec is consumed by scoreVector, so the State can be recycled before
-            // the (potentially slow) response write — keeping the parser pool free
-            // to admit the next request rather than gating on the network.
-            parser.release(st);
-        }
-        send(exchange, 200, scoreBody(response));
-    }
-
-    /**
-     * Fallback path for scorers that do not support vector input (the {@code stub}
-     * and {@code vectorize} diagnostic modes): parse into a {@link FraudRequest},
-     * validate, and score.
-     */
-    private void scoreFromRecord(HttpExchange exchange) throws IOException {
-        FraudRequest request;
-        try {
-            request = FraudRequestParser.parse(exchange.getRequestBody());
-        } catch (IOException e) {
-            sendError(exchange, 400, "invalid JSON: " + e.getMessage());
-            return;
-        }
-
-        String validationError = validate(request);
-        if (validationError != null) {
-            sendError(exchange, 400, validationError);
-            return;
-        }
-
-        FraudResponse response = scorer.score(request);
-        send(exchange, 200, scoreBody(response));
-    }
-
-    /**
-     * Validates that the mandatory sections of the payload are present.
-     * {@code last_transaction} is intentionally allowed to be {@code null}.
-     *
-     * @return an error message, or {@code null} when the request is valid
-     */
-    private static String validate(FraudRequest request) {
-        if (request == null) {
-            return "request body must be a JSON object";
-        }
-        if (request.id() == null) {
-            return "missing required field: id";
-        }
-        if (request.transaction() == null) {
-            return "missing required field: transaction";
-        }
-        if (request.customer() == null) {
-            return "missing required field: customer";
-        }
-        if (request.merchant() == null) {
-            return "missing required field: merchant";
-        }
-        if (request.terminal() == null) {
-            return "missing required field: terminal";
-        }
-        return null;
-    }
-
-    private static int resolvePort(String[] args) {
-        if (args.length > 0) {
-            return Integer.parseInt(args[0]);
-        }
-        String env = System.getenv("PORT");
-        return (env != null && !env.isBlank()) ? Integer.parseInt(env.trim()) : DEFAULT_PORT;
-    }
-
-    private void sendError(HttpExchange exchange, int status, String message) throws IOException {
-        String json = "{\"error\":\"" + escape(message) + "\"}";
-        send(exchange, status, json.getBytes(UTF_8));
-    }
-
-    private static byte[] scoreBody(FraudResponse response) {
-        String json = "{\"approved\":" + response.approved()
-                + ",\"fraud_score\":" + response.fraudScore() + "}";
-        return json.getBytes(UTF_8);
-    }
-
-    private void send(HttpExchange exchange, int status, byte[] body) throws IOException {
-        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
-        exchange.sendResponseHeaders(status, body.length);
-        try (OutputStream os = exchange.getResponseBody()) {
-            os.write(body);
+            LOG.warning(() -> "Failed to write ready file '" + path + "': " + e.getMessage());
         }
     }
 
-    /** Minimal JSON string escaping for the small, hand-written error responses. */
-    private static String escape(String s) {
-        if (s == null) {
-            return "";
-        }
-        StringBuilder b = new StringBuilder(s.length() + 8);
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '"' -> b.append("\\\"");
-                case '\\' -> b.append("\\\\");
-                case '\n' -> b.append("\\n");
-                case '\r' -> b.append("\\r");
-                case '\t' -> b.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        b.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        b.append(c);
-                    }
-                }
-            }
-        }
-        return b.toString();
+    private static Path resolvePath(String envVar, String defaultPath) {
+        String configured = System.getenv(envVar);
+        return Path.of(configured != null && !configured.isBlank() ? configured.trim() : defaultPath);
+    }
+
+    private static String env(String name, String defaultValue) {
+        String v = System.getenv(name);
+        return (v != null && !v.isBlank()) ? v.trim() : defaultValue;
     }
 }

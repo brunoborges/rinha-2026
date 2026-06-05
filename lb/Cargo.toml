@@ -1,0 +1,30 @@
+[package]
+name = "rinha-lb"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Purpose-built TCP/UDS round-robin FD-passing load balancer for Rinha de Backend 2026."
+
+[[bin]]
+name = "rinha-lb"
+path = "src/main.rs"
+
+[dependencies]
+# Minimal tokio surface: current-thread runtime, TCP/UDS sockets, the
+# #[tokio::main] macro, timers, and sync. Everything else is excluded.
+tokio = { version = "1.40", default-features = false, features = ["rt", "net", "io-util", "macros", "time", "sync"] }
+
+# libc backs the accept4 / sendmsg(SCM_RIGHTS) / setsockopt syscalls (Linux only).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = false
+
+[profile.release.package."*"]
+opt-level = 3
