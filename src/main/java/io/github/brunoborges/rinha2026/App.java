@@ -78,9 +78,47 @@ public class App {
         FdEpollServer server = new FdEpollServer(socketPath, router);
         server.start(); // blocks until the control socket is bound and listening
 
+        warmup(router);
+
         router.markReady();
         writeReadyFile();
         LOG.info(() -> "Serving fraud-score API; control socket " + socketPath);
+    }
+
+    /**
+     * Drives synthetic requests through the hot path to provoke background C2
+     * compilation, then publishes readiness only once the compiler has gone quiet
+     * — so the single contest cold run hits C2-compiled code instead of paying a
+     * fat interpreter/C1 p99 tail. Tunable at runtime (no rebuild) via env:
+     * {@code WARMUP_MS} (budget cap, default 30000; 0 disables), {@code
+     * WARMUP_STABLE_MS} (compiler-quiet window, default 3000), {@code
+     * WARMUP_MAX_ITERS} (safety cap, default 5_000_000).
+     */
+    private void warmup(HttpRouter router) {
+        long budgetMs = envInt("WARMUP_MS", 30_000);
+        if (budgetMs <= 0) {
+            LOG.info("JIT warmup disabled (WARMUP_MS=0)");
+            return;
+        }
+        long stableMs = envInt("WARMUP_STABLE_MS", 3_000);
+        int maxIters = envInt("WARMUP_MAX_ITERS", 5_000_000);
+        try {
+            TrainingDriver.warmup(router, budgetMs, stableMs, maxIters);
+        } catch (Exception e) {
+            LOG.warning(() -> "JIT warmup failed (continuing anyway): " + e.getMessage());
+        }
+    }
+
+    private static int envInt(String name, int dflt) {
+        String v = System.getenv(name);
+        if (v == null) {
+            return dflt;
+        }
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
     }
 
     /**
@@ -152,9 +190,10 @@ public class App {
      * published. The eval starts containers cold; without this the first live requests pay major page
      * faults synchronously on a single CPU, backing up the queue into an error storm.
      *
-     * <p>This is the only pre-serving work needed: compiled ahead-of-time as a GraalVM Native Image there
-     * is no JIT to warm. Failures are logged and swallowed so a hiccup never prevents the server from
-     * starting.
+     * <p>Page-faulting the dataset is paired with {@link #warmup} (JIT warmup);
+     * together they make the single cold contest run hit resident pages and
+     * C2-compiled code. Failures are logged and swallowed so a hiccup never
+     * prevents the server from starting.
      */
     private void preload() {
         try {

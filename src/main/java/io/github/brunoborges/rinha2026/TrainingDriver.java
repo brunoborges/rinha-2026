@@ -1,5 +1,7 @@
 package io.github.brunoborges.rinha2026;
 
+import java.lang.management.CompilationMXBean;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.Random;
 import java.util.logging.Logger;
@@ -31,6 +33,79 @@ final class TrainingDriver {
     private static final int DEFAULT_ITERATIONS = 300_000;
 
     private TrainingDriver() {
+    }
+
+    /**
+     * Runtime JIT warmup, run on the main thread <em>before</em> the readiness
+     * file is published (i.e. before the load balancer routes any traffic).
+     *
+     * <p>The contest scores a single <em>cold</em> run under a ramping load.
+     * Without warmup the first few thousand requests execute interpreted / C1
+     * code while C2 (tier 4) compiles in the background, producing a fat p99 tail
+     * (measured ~44 ms cold vs ~3–4 ms once C2 is hot). We cannot use
+     * {@code -XX:-BackgroundCompilation} (foreground compilation would block our
+     * single-threaded epoll loop and stall every request), so instead we drive
+     * synthetic requests through the exact hot path to trigger background C2
+     * compilation, and only flip readiness once the compiler has gone quiet.
+     *
+     * <p>Strategy: keep driving synthetic {@code /fraud-score} requests through
+     * {@link HttpRouter#responseIndex} continuously while watching
+     * {@link CompilationMXBean#getTotalCompilationTime()}. Driving load the whole
+     * time keeps invocation counters hot so every method the request path touches
+     * tiers up; we exit as soon as total compile time has been <em>stable for
+     * {@code stableMs}</em> (the background queue drained and nothing new is being
+     * compiled), or when {@code budgetMs}/{@code maxIters} is exhausted. The code
+     * cache is process-wide, so methods compiled here are live for the epoll
+     * serving thread.
+     */
+    static void warmup(HttpRouter router, long budgetMs, long stableMs, int maxIters) {
+        CompilationMXBean comp = ManagementFactory.getCompilationMXBean();
+        boolean canMonitor = comp != null && comp.isCompilationTimeMonitoringSupported();
+
+        HttpConnection conn = new HttpConnection();
+        Random rnd = new Random(42);
+        byte[] scratch = new byte[HttpConnection.BUF_SIZE];
+
+        long startNanos = System.nanoTime();
+        long budgetNanos = budgetMs * 1_000_000L;
+        long stableNanos = stableMs * 1_000_000L;
+        long lastCompileMs = canMonitor ? comp.getTotalCompilationTime() : 0;
+        long lastChangeNanos = startNanos;
+
+        int iters = 0;
+        boolean settled = false;
+        while (iters < maxIters) {
+            // Drive a batch before re-checking the clock / compiler (cheap loop).
+            for (int k = 0; k < 2048 && iters < maxIters; k++, iters++) {
+                int len = buildRequest(scratch, rnd);
+                conn.reset();
+                System.arraycopy(scratch, 0, conn.buf, 0, len);
+                conn.pos = len;
+                if (conn.tryParse() == HttpConnection.READY) {
+                    router.responseIndex(conn);
+                }
+            }
+            long now = System.nanoTime();
+            if (canMonitor) {
+                long ct = comp.getTotalCompilationTime();
+                if (ct != lastCompileMs) {
+                    lastCompileMs = ct;
+                    lastChangeNanos = now;
+                } else if (now - lastChangeNanos >= stableNanos) {
+                    settled = true;
+                    break; // compiler quiet under sustained load -> hot path is C2-compiled
+                }
+            }
+            if (now - startNanos >= budgetNanos) {
+                break;
+            }
+        }
+
+        long ms = (System.nanoTime() - startNanos) / 1_000_000;
+        boolean done = settled;
+        int total = iters;
+        LOG.info(() -> "JIT warmup: drove " + total + " synthetic requests in " + ms + " ms ("
+                + (done ? "compiler settled" : "budget/iters exhausted") + ")");
     }
 
     static void run() {

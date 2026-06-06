@@ -1,19 +1,37 @@
 # syntax=docker/dockerfile:1
 
 # =============================================================================
-# Rinha de Backend 2026 — fraud-scoring API (HotSpot JDK 25 + AOT cache)
+# Rinha de Backend 2026 — fraud-scoring API (HotSpot JDK 27-EA + AOT cache)
 #
-# Runtime migrated from GraalVM native-image to HotSpot Temurin JDK 25 with the
-# JDK 25 AOT cache (Project Leyden: JEP 483 class load/link + JEP 515 method
-# profiling). Rationale (see plan.md Phase 2/3): an offline experiment proved the
-# KD-tree index gives no candidate-count advantage over our IVF for this 14-dim
-# data — both need ~27k candidate evals to reach single-digit detection error.
-# The competitor's 1.441 ms p99 comes from the RUNTIME, not the index: C2's
-# auto-vectorized (AVX2) int16 distance kernel + the AOT cache removing most JIT
-# warmup + jemalloc + JVM tuning. This image adopts that runtime while keeping
-# our proven IVF index and FFM epoll fd-passing server (FFM is standard on
-# HotSpot; no GraalVM Feature needed).
+# Runtime migrated from GraalVM native-image to HotSpot with the Leyden AOT cache
+# (JEP 483 class load/link + JEP 515 method profiling). The server runs on OpenJDK
+# 27 Early-Access, whose UseCompactObjectHeaders (JEP 519) is on by DEFAULT —
+# 8-byte object headers buy heap headroom under the 167 MB cap — and whose C2/AOT
+# improvements measurably cut the cold-run p99 (mean score ~4506 vs ~4170 on JDK 25,
+# best cold run 6.08 ms p99 / score 4826). Rationale (see plan.md Phase 2/3): an
+# offline experiment proved the KD-tree index gives no candidate-count advantage
+# over our IVF for this 14-dim data — both need ~27k candidate evals to reach
+# single-digit detection error. The competitor's 1.441 ms p99 comes from the
+# RUNTIME, not the index: C2's auto-vectorized (AVX2) int16 distance kernel + the
+# AOT cache removing most JIT warmup + jemalloc + JVM tuning. This image adopts
+# that runtime while keeping our proven IVF index and FFM epoll fd-passing server
+# (FFM is standard on HotSpot; no GraalVM Feature needed).
 #
+# Five stages:
+#   1. build       — maven + Temurin 25: shaded jar + off-heap int16 IVF references.bin
+#                    (--release 25 bytecode + raw data are JDK-version-agnostic).
+#   jdk27          — OpenJDK 27-EA tarball base (JAVA_HOME) for the AOT + runtime stages.
+#   2. aot-record  — run the scoring hot path (AOT_TRAINING) under -XX:AOTMode=record.
+#   3. aot-create  — assemble the AOT cache (-XX:AOTMode=create) from the recorded config.
+#   4. runtime     — JDK 27-EA + jemalloc + jar + references.bin + app.aot. A startup
+#                    JIT warmup (App.warmup) provokes background C2 and waits for the
+#                    compiler to settle before /ready, so the single cold contest run
+#                    hits C2-compiled code.
+#
+# The AOT cache is keyed on the JVM flags, classpath and jar: JVM_FLAGS MUST be
+# byte-identical across record, create and the runtime ENTRYPOINT or the cache is
+# silently ignored (cold JIT). They are all driven from the single ARG below.
+# =============================================================================
 # Four stages:
 #   1. build       — maven + Temurin 25: shaded jar + off-heap int16 IVF references.bin.
 #   2. aot-record  — run the scoring hot path (AOT_TRAINING) under -XX:AOTMode=record.
@@ -56,8 +74,27 @@ RUN set -eux; \
     cp target/rinha-2026-1.0-SNAPSHOT.jar /app/app.jar; \
     ls -la /app/references.bin /app/app.jar
 
+# ---- jdk27: JDK 27 Early-Access runtime (compact object headers) ------------
+# JDK 27 EA defaults UseCompactObjectHeaders on (JEP 519), shrinking on-heap
+# object headers from 12/16 to 8 bytes — valuable headroom under the 167 MB cap.
+# The Maven build above stays on Temurin 25 (it only emits --release 25 bytecode
+# + the off-heap references.bin, both JDK-version-agnostic); the AOT cache and the
+# server run on JDK 27.
+FROM debian:bookworm-slim AS jdk27
+ARG JDK27_URL=https://download.java.net/java/early_access/jdk27/24/GPL/openjdk-27-ea+24_linux-x64_bin.tar.gz
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    curl -fSL -o /tmp/jdk27.tar.gz "$JDK27_URL"; \
+    mkdir -p /opt/jdk27; \
+    tar -xzf /tmp/jdk27.tar.gz -C /opt/jdk27 --strip-components=1; \
+    rm -f /tmp/jdk27.tar.gz; \
+    rm -rf /var/lib/apt/lists/*; \
+    /opt/jdk27/bin/java -version
+ENV JAVA_HOME=/opt/jdk27 PATH=/opt/jdk27/bin:$PATH
+
 # ---- 2. aot-record: capture classes + method profiles -----------------------
-FROM eclipse-temurin:25-jdk AS aot-record
+FROM jdk27 AS aot-record
 ARG JVM_FLAGS
 WORKDIR /app
 COPY --from=build /app/app.jar /app/app.jar
@@ -73,7 +110,7 @@ RUN AOT_TRAINING=1 REFERENCES_BIN=/app/references.bin \
     ls -la /app/app.aotconf
 
 # ---- 3. aot-create: assemble the AOT cache ----------------------------------
-FROM eclipse-temurin:25-jdk AS aot-create
+FROM jdk27 AS aot-create
 ARG JVM_FLAGS
 WORKDIR /app
 COPY --from=build /app/app.jar /app/app.jar
@@ -87,7 +124,7 @@ RUN java $JVM_FLAGS \
     ls -la /app/app.aot
 
 # ---- 4. runtime stage -------------------------------------------------------
-FROM eclipse-temurin:25-jdk AS runtime
+FROM jdk27 AS runtime
 ARG JVM_FLAGS
 
 # jemalloc: the competitor preloads it (MALLOC_ARENA_MAX=1) to curb glibc arena
