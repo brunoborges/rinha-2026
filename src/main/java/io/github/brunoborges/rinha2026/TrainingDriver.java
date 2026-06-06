@@ -64,7 +64,23 @@ final class TrainingDriver {
 
         HttpConnection conn = new HttpConnection();
         Random rnd = new Random(42);
+
+        // Pre-build a bounded pool of distinct synthetic requests and cycle through it instead of
+        // generating a fresh random request every iteration. JIT only needs the hot METHODS
+        // exercised, not endless distinct data; an unbounded random stream makes the KdTree
+        // traversal fault an ever-growing union of the ~92 MB off-heap pts mmap, spiking resident
+        // memory past the 167 MB cgroup cap during warmup (transient OOM). A bounded pool keeps the
+        // warmup pts working set small and repeatable (re-touched pages stay resident) while still
+        // tiering up the whole request path. Tunable via WARMUP_POOL (default 1024).
+        int pool = Math.max(1, envInt("WARMUP_POOL", 1024));
+        byte[][] reqs = new byte[pool][];
+        int[] reqLens = new int[pool];
         byte[] scratch = new byte[HttpConnection.BUF_SIZE];
+        for (int i = 0; i < pool; i++) {
+            int len = buildRequest(scratch, rnd);
+            reqs[i] = java.util.Arrays.copyOf(scratch, len);
+            reqLens[i] = len;
+        }
 
         long startNanos = System.nanoTime();
         long budgetNanos = budgetMs * 1_000_000L;
@@ -77,9 +93,10 @@ final class TrainingDriver {
         while (iters < maxIters) {
             // Drive a batch before re-checking the clock / compiler (cheap loop).
             for (int k = 0; k < 2048 && iters < maxIters; k++, iters++) {
-                int len = buildRequest(scratch, rnd);
+                int idx = iters % pool;
+                int len = reqLens[idx];
                 conn.reset();
-                System.arraycopy(scratch, 0, conn.buf, 0, len);
+                System.arraycopy(reqs[idx], 0, conn.buf, 0, len);
                 conn.pos = len;
                 if (conn.tryParse() == HttpConnection.READY) {
                     router.responseIndex(conn);

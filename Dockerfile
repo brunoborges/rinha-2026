@@ -43,11 +43,13 @@
 # =============================================================================
 
 # Conservative, cgroup-aware defaults (167 MB / 0.4625 CPU per instance). We do
-# NOT copy the competitor's -Xms65m/AlwaysPreTouch/THP bundle blindly: with the
-# 84 MB mmap'd dataset that risks OOM on a 167 MB limit. Tune on the VM via the
-# JVM_FLAGS build-arg (and the runtime can disable AOT for an A/B by overriding
-# AOT_FLAGS="" — flags otherwise identical).
-ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx72m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
+# NOT copy the competitor's -Xms65m/AlwaysPreTouch/THP bundle blindly. The KdTree
+# scorer keeps pts (~92 MB) off-heap in a file-backed mmap (reclaimable page cache,
+# MADV_RANDOM) and only ~34 MB of nav (topBbox+topSlot) on-heap, so a 48 MB heap
+# holds the nav plus warmup young-gen and the peak RSS stays under 167 MB (measured
+# ~157 MB with AOT). Tune on the VM via the JVM_FLAGS build-arg (and the runtime can
+# disable AOT for an A/B by overriding AOT_FLAGS="" — flags otherwise identical).
+ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx48m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
 
 # ---- 1. build stage: shaded jar + IVF references.bin ------------------------
 FROM maven:3.9-eclipse-temurin-25 AS build
@@ -165,6 +167,8 @@ ENV REFERENCES_BIN=/app/references.bin \
     MAX_NPROBE=16 \
     SCAN_CAP=120000 \
     WORKERS=1 \
+    KDTREE_PREWARM=hints \
+    KDTREE_MMAP_ADVICE=random \
     JVM_FLAGS="${JVM_FLAGS}" \
     AOT_FLAGS="-XX:AOTCache=/app/app.aot -Xlog:aot=info" \
     LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2 \

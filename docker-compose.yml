@@ -33,10 +33,12 @@ services:
     environment:
       FD_SOCKET: "/sockets/api1.sock"
       READY_FILE: "/tmp/rinha-ready"
-      SCORER: "${SCORER:-ivf}"
+      SCORER: "${SCORER:-kdtree}"
       NPROBE: "${NPROBE:-6}"
       MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
+      WARMUP_MS: "${WARMUP_MS:-30000}"
+      AOT_FLAGS: "${AOT_FLAGS:--XX:AOTCache=/app/app.aot -Xlog:aot=info}"
     volumes:
       - sockets:/sockets
     networks:
@@ -54,10 +56,12 @@ services:
     environment:
       FD_SOCKET: "/sockets/api2.sock"
       READY_FILE: "/tmp/rinha-ready"
-      SCORER: "${SCORER:-ivf}"
+      SCORER: "${SCORER:-kdtree}"
       NPROBE: "${NPROBE:-6}"
       MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
+      WARMUP_MS: "${WARMUP_MS:-30000}"
+      AOT_FLAGS: "${AOT_FLAGS:--XX:AOTCache=/app/app.aot -Xlog:aot=info}"
     volumes:
       - sockets:/sockets
     networks:

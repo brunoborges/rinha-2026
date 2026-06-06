@@ -64,7 +64,23 @@ public final class KdTreeFraudScorer implements FraudScorer {
 
     @Override
     public void preload() {
-        tree.applyMmapHints();
-        tree.prewarm();
+        // Under the 167MB cgroup hard limit, eagerly faulting all ~96MB of mmap'd pts
+        // (MADV_POPULATE_READ) pushes cgroup-charged page cache + heap + JVM overhead over
+        // the cap and gets the process OOM-killed. BBF+bbox pruning only visits a few hundred
+        // nodes/query, so the hot working set is tiny; we advise MADV_RANDOM (no readahead) and
+        // let pts pages fault lazily instead of resident-pinning the whole file. Override with
+        // KDTREE_PREWARM=full (legacy populate) or =none (no hints) for A/B on roomier limits.
+        String mode = System.getenv("KDTREE_PREWARM");
+        if (mode == null || mode.isEmpty()) {
+            mode = "hints";
+        }
+        switch (mode.trim().toLowerCase()) {
+            case "none" -> { }
+            case "full" -> {
+                tree.applyMmapHints();
+                tree.prewarm();
+            }
+            default -> tree.applyMmapHints();
+        }
     }
 }
