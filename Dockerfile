@@ -49,7 +49,15 @@
 # holds the nav plus warmup young-gen and the peak RSS stays under 167 MB (measured
 # ~157 MB with AOT). Tune on the VM via the JVM_FLAGS build-arg (and the runtime can
 # disable AOT for an A/B by overriding AOT_FLAGS="" — flags otherwise identical).
-ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx48m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
+# GC sizing rationale: the on-heap KdTree nav (topBbox+topSlot) is a ~35 MB live set
+# that never dies. At -Xmx48m with the default NewRatio=2 the old gen (~32 MB) is
+# SMALLER than the live set, so SerialGC can never run a cheap young collection and
+# every GC is a whole-heap mark-compact Full GC (measured: 12 Full GCs / 11-43 ms each
+# under load, zero young GCs -> STW spikes in the p99 tail). Fix: -Xmx56m -Xmn12m puts
+# the old gen at ~44 MB (comfortably above the 35 MB live set) and gives a 12 MB young
+# gen to absorb short-lived per-request garbage, so steady state is cheap young GCs and
+# Full GCs effectively disappear. Peak RSS still fits 167 MB (AOT on, ~150 MB).
+ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx56m -Xmn12m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
 
 # ---- 1. build stage: shaded jar + IVF references.bin ------------------------
 FROM maven:3.9-eclipse-temurin-25 AS build

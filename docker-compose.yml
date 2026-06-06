@@ -38,6 +38,7 @@ services:
       MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
       WARMUP_MS: "${WARMUP_MS:-30000}"
+      JVM_FLAGS: "${JVM_FLAGS:--XX:+UseSerialGC -Xms24m -Xmx56m -Xmn12m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED}"
       AOT_FLAGS: "${AOT_FLAGS:--XX:AOTCache=/app/app.aot -Xlog:aot=info}"
     volumes:
       - sockets:/sockets
@@ -61,6 +62,7 @@ services:
       MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
       WARMUP_MS: "${WARMUP_MS:-30000}"
+      JVM_FLAGS: "${JVM_FLAGS:--XX:+UseSerialGC -Xms24m -Xmx56m -Xmn12m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED}"
       AOT_FLAGS: "${AOT_FLAGS:--XX:AOTCache=/app/app.aot -Xlog:aot=info}"
     volumes:
       - sockets:/sockets
