@@ -83,6 +83,18 @@ public final class ReferenceDataset implements AutoCloseable {
     private static final ValueLayout.OfShort SHORT_LE =
             ValueLayout.JAVA_SHORT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
+    /**
+     * Wider little-endian unaligned views used by {@link #squaredDistanceDirect}
+     * to pull four / two packed int16 dims per load straight from the mmap. On
+     * HotSpot C2 these {@link MemorySegment} accessors intrinsify to single CPU
+     * loads, so the distance kernel no longer needs the off-heap-to-heap bulk
+     * copy that GraalVM native-image required.
+     */
+    private static final ValueLayout.OfLong LONG_LE =
+            ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfInt INT_LE =
+            ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+
     private final MemorySegment vectors;
     private final MemorySegment labels;
     private final int count;
@@ -261,6 +273,37 @@ public final class ReferenceDataset implements AutoCloseable {
             sum1 += (long) b * b;
         }
         return sum0 + sum1;
+    }
+
+    /**
+     * Competitor-style squared Euclidean distance read straight from the off-heap
+     * mmap, with no bulk copy to a heap buffer. The 14 int16 dims (28 bytes) are
+     * pulled as three packed {@code long}s (12 dims) plus one packed {@code int}
+     * (2 dims); each cast to {@code short} sign-extends the lane. On HotSpot C2
+     * the {@link MemorySegment} long/int loads intrinsify to single CPU loads, so
+     * this avoids the per-chunk {@link #copyVectorRange} memory traffic. Reads
+     * exactly {@code DIMS*2} bytes, so the final record needs no padding.
+     *
+     * <p>Assumes {@code DIMS == 14}.
+     */
+    public long squaredDistanceDirect(short[] query, int index) {
+        long byteBase = (long) index * DIMS * Short.BYTES;
+        long sum0 = 0;
+        long sum1 = 0;
+        for (int g = 0; g < 3; g++) {
+            long packed = vectors.get(LONG_LE, byteBase + (long) g * Long.BYTES);
+            int d = g << 2;
+            int a0 = query[d] - (short) packed;
+            int a1 = query[d + 1] - (short) (packed >> 16);
+            int a2 = query[d + 2] - (short) (packed >> 32);
+            int a3 = query[d + 3] - (short) (packed >> 48);
+            sum0 += (long) a0 * a0 + (long) a2 * a2;
+            sum1 += (long) a1 * a1 + (long) a3 * a3;
+        }
+        int tail = vectors.get(INT_LE, byteBase + 24L);
+        int a12 = query[12] - (short) tail;
+        int a13 = query[13] - (short) (tail >> 16);
+        return sum0 + sum1 + (long) a12 * a12 + (long) a13 * a13;
     }
 
     /**

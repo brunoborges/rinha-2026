@@ -44,6 +44,7 @@ services:
       NPROBE: "${NPROBE:-8}"
       MAX_NPROBE: "${MAX_NPROBE:-24}"
       SCAN_CAP: "${SCAN_CAP:-120000}"
+      READ: "${READ:-direct}"               # direct (mmap) | copy (heap) — distance read path
       THROTTLE_STATS: "${THROTTLE_STATS:-auto}"  # auto = report CFS throttle counters when cpu-limited
     volumes:
       # The 27MB corpus is mounted read-only rather than baked into the image.

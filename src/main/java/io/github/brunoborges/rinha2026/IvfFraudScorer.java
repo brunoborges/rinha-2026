@@ -94,6 +94,17 @@ public final class IvfFraudScorer implements FraudScorer {
      */
     private static final int CHUNK = 8192;
 
+    /**
+     * Distance-kernel selector (A/B). Default reads each candidate straight from
+     * the off-heap mmap via {@link ReferenceDataset#squaredDistanceDirect} — the
+     * competitor's approach, valid now that the runtime is HotSpot (C2 intrinsifies
+     * the FFM long/int loads). Set {@code READ=copy} to fall back to the legacy
+     * bulk-copy-to-heap path (required under GraalVM native-image, where per-element
+     * FFM reads were not intrinsified). Resolved once and {@code static final} so
+     * C2 folds the dead branch and only one kernel compiles.
+     */
+    private static final boolean DIRECT_READ = !"copy".equalsIgnoreCase(System.getenv("READ"));
+
     private final TransactionVectorizer vectorizer;
     private final ReferenceDataset dataset;
     private final ArrayBlockingQueue<Scratch> scratchPool;
@@ -140,7 +151,8 @@ public final class IvfFraudScorer implements FraudScorer {
         }
         LOG.info(() -> "IVF scorer: clusters=" + dataset.clusters() + ", nprobe=" + this.baseNprobe
                 + ", maxNprobe=" + this.maxNprobe + ", refineBand=[" + REFINE_MIN_FRAUDS + ","
-                + REFINE_MAX_FRAUDS + "], scanCap=" + this.scanCap + ", scanThreads=" + permits);
+                + REFINE_MAX_FRAUDS + "], scanCap=" + this.scanCap + ", scanThreads=" + permits
+                + ", read=" + (DIRECT_READ ? "direct(mmap)" : "copy(heap)"));
     }
 
     @Override
@@ -298,29 +310,36 @@ public final class IvfFraudScorer implements FraudScorer {
                     break scan;
                 }
                 int n = Math.min(Math.min(CHUNK, end - base), remaining);
-                dataset.copyVectorRange(base, n, buf, 0);
+                if (!DIRECT_READ) {
+                    dataset.copyVectorRange(base, n, buf, 0);
+                }
                 for (int t = 0; t < n; t++) {
-                    int off = t * DIMS;
-                    int a0 = q0 - buf[off];
-                    int a1 = q1 - buf[off + 1];
-                    int a2 = q2 - buf[off + 2];
-                    int a3 = q3 - buf[off + 3];
-                    int a4 = q4 - buf[off + 4];
-                    int a5 = q5 - buf[off + 5];
-                    int a6 = q6 - buf[off + 6];
-                    int a7 = q7 - buf[off + 7];
-                    int a8 = q8 - buf[off + 8];
-                    int a9 = q9 - buf[off + 9];
-                    int a10 = q10 - buf[off + 10];
-                    int a11 = q11 - buf[off + 11];
-                    int a12 = q12 - buf[off + 12];
-                    int a13 = q13 - buf[off + 13];
+                    long d2;
+                    if (DIRECT_READ) {
+                        d2 = dataset.squaredDistanceDirect(query, base + t);
+                    } else {
+                        int off = t * DIMS;
+                        int a0 = q0 - buf[off];
+                        int a1 = q1 - buf[off + 1];
+                        int a2 = q2 - buf[off + 2];
+                        int a3 = q3 - buf[off + 3];
+                        int a4 = q4 - buf[off + 4];
+                        int a5 = q5 - buf[off + 5];
+                        int a6 = q6 - buf[off + 6];
+                        int a7 = q7 - buf[off + 7];
+                        int a8 = q8 - buf[off + 8];
+                        int a9 = q9 - buf[off + 9];
+                        int a10 = q10 - buf[off + 10];
+                        int a11 = q11 - buf[off + 11];
+                        int a12 = q12 - buf[off + 12];
+                        int a13 = q13 - buf[off + 13];
 
-                    long sum0 = (long) a0 * a0 + (long) a1 * a1 + (long) a2 * a2 + (long) a3 * a3;
-                    long sum1 = (long) a4 * a4 + (long) a5 * a5 + (long) a6 * a6 + (long) a7 * a7;
-                    long sum2 = (long) a8 * a8 + (long) a9 * a9 + (long) a10 * a10 + (long) a11 * a11;
-                    long sum3 = (long) a12 * a12 + (long) a13 * a13;
-                    long d2 = sum0 + sum1 + sum2 + sum3;
+                        long sum0 = (long) a0 * a0 + (long) a1 * a1 + (long) a2 * a2 + (long) a3 * a3;
+                        long sum1 = (long) a4 * a4 + (long) a5 * a5 + (long) a6 * a6 + (long) a7 * a7;
+                        long sum2 = (long) a8 * a8 + (long) a9 * a9 + (long) a10 * a10 + (long) a11 * a11;
+                        long sum3 = (long) a12 * a12 + (long) a13 * a13;
+                        d2 = sum0 + sum1 + sum2 + sum3;
+                    }
                     if (d2 < bestDist[worstNeighbor]) {
                         bestDist[worstNeighbor] = d2;
                         bestFraud[worstNeighbor] = dataset.isFraud(base + t);
@@ -374,7 +393,9 @@ public final class IvfFraudScorer implements FraudScorer {
         final int[] cid;
         final long[] bestDist = new long[K];
         final boolean[] bestFraud = new boolean[K];
-        final short[] buf = new short[CHUNK * DIMS];
+        // Only the legacy copy path needs the off-heap->heap staging buffer; the
+        // default direct-read path scans the mmap in place, saving ~229 KiB/worker.
+        final short[] buf = DIRECT_READ ? null : new short[CHUNK * DIMS];
         // Running cursor carried between the baseline and refinement scan passes.
         int worstNeighbor;
         int scanned;

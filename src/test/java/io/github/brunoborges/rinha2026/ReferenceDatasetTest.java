@@ -18,6 +18,35 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ReferenceDatasetTest {
 
     @Test
+    void directReadDistanceMatchesPerElementOnMmap() throws Exception {
+        ReferenceDataset source;
+        try (InputStream in = getClass().getResourceAsStream("/example-references.json")) {
+            source = ReferenceDataset.load(in);
+        }
+        Path bin = Files.createTempFile("references-direct", ".bin");
+        try {
+            source.writeBinary(bin);
+            java.util.Random rnd = new java.util.Random(42);
+            try (ReferenceDataset mapped = ReferenceDataset.mmap(bin)) {
+                for (int iter = 0; iter < 200; iter++) {
+                    double[] probe = new double[14];
+                    for (int d = 0; d < 14; d++) {
+                        probe[d] = rnd.nextDouble() * 2 - 1; // [-1,1]
+                    }
+                    short[] q = ReferenceDataset.quantize(probe);
+                    for (int i = 0; i < mapped.count(); i++) {
+                        assertEquals(mapped.squaredDistance(q, i),
+                                mapped.squaredDistanceDirect(q, i),
+                                "direct-read mismatch at record " + i + " iter " + iter);
+                    }
+                }
+            }
+        } finally {
+            Files.deleteIfExists(bin);
+        }
+    }
+
+    @Test
     void streamsExampleReferencesFixture() throws Exception {
         try (InputStream in = getClass().getResourceAsStream("/example-references.json")) {
             ReferenceDataset dataset = ReferenceDataset.load(in);
