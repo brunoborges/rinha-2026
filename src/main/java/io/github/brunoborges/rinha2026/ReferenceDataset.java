@@ -340,14 +340,14 @@ public final class ReferenceDataset implements AutoCloseable {
      * {@code count * DIMENSIONS} (row-major). Used by the offline
      * {@link IvfIndexBuilder}; not on any request path.
      */
-    short[] toQuantizedArray() {
+    public short[] toQuantizedArray() {
         short[] out = new short[count * DIMS];
         MemorySegment.copy(vectors, SHORT_LE, 0, out, 0, count * DIMS);
         return out;
     }
 
     /** Copies every label into a heap {@code byte[]} (1 = fraud). Build-time only. */
-    byte[] toLabelArray() {
+    public byte[] toLabelArray() {
         byte[] out = new byte[count];
         MemorySegment.copy(labels, ValueLayout.JAVA_BYTE, 0, out, 0, count);
         return out;

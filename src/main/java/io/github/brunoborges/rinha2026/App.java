@@ -5,6 +5,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.logging.Logger;
 
+import io.github.brunoborges.rinha2026.kdport.KdTree;
+import io.github.brunoborges.rinha2026.kdport.KdTreeIO;
+
 /**
  * Fraud-scoring API for Rinha de Backend 2026.
  *
@@ -24,6 +27,9 @@ public class App {
 
     /** Default location of the pre-built binary reference dataset. */
     private static final String DEFAULT_REFERENCES_BIN = "resources/references.bin";
+
+    /** Default location of the pre-built mmap-loadable KdTree index binary. */
+    private static final String DEFAULT_KDTREE_BIN = "resources/kdtree.bin";
 
     /** Default location of the JSON reference dataset (fallback). */
     private static final String DEFAULT_REFERENCES_FILE = "resources/references.json.gz";
@@ -141,6 +147,30 @@ public class App {
             if (mode.equals("vectorize")) {
                 LOG.warning("SCORER=vectorize: vectorizing only, skipping the scan (diagnostic).");
                 return new VectorizeOnlyFraudScorer(new TransactionVectorizer());
+            }
+        }
+
+        // KdTree exact-kNN index is the default when its binary is present; SCORER=ivf forces the
+        // approximate IVF scan (fallback). Offline eval: KdTree E=0 vs IVF E=26 at ~10x fewer visits.
+        boolean forceIvf = "ivf".equals(mode);
+        boolean wantKd = "kdtree".equals(mode) || "kd".equals(mode);
+        if (!forceIvf) {
+            Path kdBin = resolvePath("KDTREE_BIN", DEFAULT_KDTREE_BIN);
+            if (Files.isReadable(kdBin)) {
+                try {
+                    long start = System.nanoTime();
+                    KdTree tree = KdTreeIO.loadMmap(kdBin);
+                    long ms = (System.nanoTime() - start) / 1_000_000;
+                    LOG.info(() -> "Memory-mapped KdTree index (" + tree.size() + " nodes) from '"
+                            + kdBin + "' in " + ms + " ms");
+                    return new KdTreeFraudScorer(new TransactionVectorizer(), tree);
+                } catch (IOException e) {
+                    LOG.warning(() -> "Failed to load KdTree index '" + kdBin + "': " + e.getMessage()
+                            + "; trying IVF/dataset.");
+                }
+            } else if (wantKd) {
+                LOG.warning(() -> "SCORER=kdtree requested but no readable index at '"
+                        + kdBin.toAbsolutePath() + "'; trying IVF/dataset.");
             }
         }
 

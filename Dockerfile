@@ -7,15 +7,14 @@
 # (JEP 483 class load/link + JEP 515 method profiling). The server runs on OpenJDK
 # 27 Early-Access, whose UseCompactObjectHeaders (JEP 519) is on by DEFAULT —
 # 8-byte object headers buy heap headroom under the 167 MB cap — and whose C2/AOT
-# improvements measurably cut the cold-run p99 (mean score ~4506 vs ~4170 on JDK 25,
-# best cold run 6.08 ms p99 / score 4826). Rationale (see plan.md Phase 2/3): an
-# offline experiment proved the KD-tree index gives no candidate-count advantage
-# over our IVF for this 14-dim data — both need ~27k candidate evals to reach
-# single-digit detection error. The competitor's 1.441 ms p99 comes from the
-# RUNTIME, not the index: C2's auto-vectorized (AVX2) int16 distance kernel + the
-# AOT cache removing most JIT warmup + jemalloc + JVM tuning. This image adopts
-# that runtime while keeping our proven IVF index and FFM epoll fd-passing server
-# (FFM is standard on HotSpot; no GraalVM Feature needed).
+# improvements measurably cut the cold-run p99. The index is now an exact bbox-pruned
+# KD-tree (ported from the competitor, MIT): an offline experiment over the 54,100-query
+# eval corpus measured E=0 (FP=0, FN=0) at ~2,900 p99 node visits — perfect detection at
+# ~10x fewer candidate evaluations than the IVF (~27k for single-digit E). pts is mmap'd
+# off-heap (96 MB, reclaimable file cache); topSlot+topBbox (~34 MB) load on-heap. The
+# approximate IVF scan is retained as a fallback (SCORER=ivf). The runtime (C2's AVX2 int16
+# distance kernel + AOT cache removing JIT warmup + jemalloc + JVM tuning) and the FFM epoll
+# fd-passing server (standard on HotSpot; no GraalVM Feature needed) are kept.
 #
 # Five stages:
 #   1. build       — maven + Temurin 25: shaded jar + off-heap int16 IVF references.bin
@@ -48,7 +47,7 @@
 # 84 MB mmap'd dataset that risks OOM on a 167 MB limit. Tune on the VM via the
 # JVM_FLAGS build-arg (and the runtime can disable AOT for an A/B by overriding
 # AOT_FLAGS="" — flags otherwise identical).
-ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx48m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
+ARG JVM_FLAGS="-XX:+UseSerialGC -Xms24m -Xmx72m -Xss512k -XX:MaxMetaspaceSize=48m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:CICompilerCount=2 -XX:+UseFMA -XX:-UsePerfData -XX:+DisableExplicitGC --enable-native-access=ALL-UNNAMED"
 
 # ---- 1. build stage: shaded jar + IVF references.bin ------------------------
 FROM maven:3.9-eclipse-temurin-25 AS build
@@ -73,6 +72,15 @@ RUN set -eux; \
     rm -f /tmp/references.json.gz; \
     cp target/rinha-2026-1.0-SNAPSHOT.jar /app/app.jar; \
     ls -la /app/references.bin /app/app.jar
+
+# Pre-build the mmap-loadable KdTree index (exact k-NN; offline eval E=0 vs IVF E=26 at ~10x
+# fewer node visits). pts is mmap'd off-heap at runtime; topSlot+topBbox (~34 MB) load on-heap.
+RUN set -eux; \
+    java -Xmx3g --enable-native-access=ALL-UNNAMED \
+        -cp target/rinha-2026-1.0-SNAPSHOT.jar \
+        io.github.brunoborges.rinha2026.KdTreeIndexBuilder \
+        /app/references.bin /app/kdtree.bin; \
+    ls -la /app/kdtree.bin
 
 # ---- jdk27: JDK 27 Early-Access runtime (compact object headers) ------------
 # JDK 27 EA defaults UseCompactObjectHeaders on (JEP 519), shrinking on-heap
@@ -99,10 +107,12 @@ ARG JVM_FLAGS
 WORKDIR /app
 COPY --from=build /app/app.jar /app/app.jar
 COPY --from=build /app/references.bin /app/references.bin
+COPY --from=build /app/kdtree.bin /app/kdtree.bin
 
 # Drive the real scoring hot path with synthetic requests, then exit. The JVM
-# records loaded/linked classes and method profiles into app.aotconf.
-RUN AOT_TRAINING=1 REFERENCES_BIN=/app/references.bin \
+# records loaded/linked classes and method profiles into app.aotconf. KDTREE_BIN
+# selects the KdTree scorer so its methods (not the IVF fallback) get recorded.
+RUN AOT_TRAINING=1 KDTREE_BIN=/app/kdtree.bin REFERENCES_BIN=/app/references.bin \
     java $JVM_FLAGS \
         -XX:AOTMode=record \
         -XX:AOTConfiguration=/app/app.aotconf \
@@ -137,6 +147,7 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=build /app/app.jar /app/app.jar
 COPY --from=build /app/references.bin /app/references.bin
+COPY --from=build /app/kdtree.bin /app/kdtree.bin
 COPY --from=aot-create /app/app.aot /app/app.aot
 
 RUN mkdir -p /sockets && chown app:app /sockets
@@ -144,7 +155,10 @@ RUN mkdir -p /sockets && chown app:app /sockets
 # JVM_FLAGS must match the record/create runs for the AOT cache to load. AOT_FLAGS
 # is split out so an A/B run can disable the cache (AOT_FLAGS="") without changing
 # the rest. The fd-passing server binds NO TCP port (the Rust LB owns :9999).
+# KDTREE_BIN selects the exact-kNN KdTree scorer (default); set SCORER=ivf to fall
+# back to the approximate IVF scan over references.bin.
 ENV REFERENCES_BIN=/app/references.bin \
+    KDTREE_BIN=/app/kdtree.bin \
     FD_SOCKET=/sockets/api.sock \
     READY_FILE=/tmp/rinha-ready \
     NPROBE=6 \

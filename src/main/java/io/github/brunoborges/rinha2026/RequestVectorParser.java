@@ -35,13 +35,13 @@ import java.util.concurrent.ArrayBlockingQueue;
  * since the default {@code ThreadLocal} buffer recycling is ineffective with one
  * virtual thread per request.
  */
-final class RequestVectorParser {
+public final class RequestVectorParser {
 
     private final JsonFactory factory;
     private final TransactionVectorizer vectorizer;
     private final ArrayBlockingQueue<State> pool;
 
-    RequestVectorParser(TransactionVectorizer vectorizer) {
+    public RequestVectorParser(TransactionVectorizer vectorizer) {
         this.vectorizer = vectorizer;
         this.factory = JsonFactory.builder()
                 .recyclerPool(JsonRecyclerPools.newConcurrentDequePool())
@@ -54,7 +54,7 @@ final class RequestVectorParser {
     }
 
     /** Borrows a {@link State} from the pool, retrying through interrupts. */
-    State acquire() {
+    public State acquire() {
         boolean interrupted = false;
         try {
             while (true) {
@@ -71,7 +71,7 @@ final class RequestVectorParser {
         }
     }
 
-    void release(State s) {
+    public void release(State s) {
         pool.offer(s);
     }
 
@@ -81,11 +81,11 @@ final class RequestVectorParser {
      * section shape, a missing required section, or a missing/invalid timestamp.
      */
     /** A fresh reusable {@link State}; callers that own a single event-loop thread keep one and skip the pool. */
-    State newState() {
+    public State newState() {
         return new State();
     }
 
-    void vectorize(InputStream in, State s) throws IOException {
+    public void vectorize(InputStream in, State s) throws IOException {
         try (JsonParser p = factory.createParser(in)) {
             parseAndVectorize(p, s);
         }
@@ -95,7 +95,7 @@ final class RequestVectorParser {
      * Zero-copy hot-path overload: parses the request body straight out of a slice of the NIO read
      * buffer ({@code data[off .. off+len)}) without wrapping it in an {@link InputStream}.
      */
-    void vectorize(byte[] data, int off, int len, State s) throws IOException {
+    public void vectorize(byte[] data, int off, int len, State s) throws IOException {
         try (JsonParser p = factory.createParser(data, off, len)) {
             parseAndVectorize(p, s);
         }
@@ -309,8 +309,8 @@ final class RequestVectorParser {
      * strings ({@code kmCount} entries, or {@code -1} when the field is absent).
      * Both are fully overwritten each request, so no state leaks between requests.
      */
-    static final class State {
-        final double[] qvec = new double[TransactionVectorizer.DIMENSIONS];
+    public static final class State {
+        public final double[] qvec = new double[TransactionVectorizer.DIMENSIONS];
         String[] km = new String[16];
         int kmCount = -1;
     }
