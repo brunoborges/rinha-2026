@@ -35,7 +35,7 @@ services:
       READY_FILE: "/tmp/rinha-ready"
       SCORER: "${SCORER:-ivf}"
       NPROBE: "${NPROBE:-6}"
-      MAX_NPROBE: "${MAX_NPROBE:-24}"
+      MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
     volumes:
       - sockets:/sockets
@@ -56,7 +56,7 @@ services:
       READY_FILE: "/tmp/rinha-ready"
       SCORER: "${SCORER:-ivf}"
       NPROBE: "${NPROBE:-6}"
-      MAX_NPROBE: "${MAX_NPROBE:-24}"
+      MAX_NPROBE: "${MAX_NPROBE:-16}"
       WORKERS: "${WORKERS:-1}"
     volumes:
       - sockets:/sockets

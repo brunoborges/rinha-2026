@@ -64,9 +64,16 @@ public final class IvfFraudScorer implements FraudScorer {
      * out to {@code MAX_NPROBE} and the running top-k heap is simply extended, the
      * refined result is identical to a uniform {@code MAX_NPROBE} scan &mdash; but the
      * cost is paid on only the boundary queries, so average scan work (and p99) stay
-     * close to the {@code NPROBE}=8 baseline while detection improves markedly.
+     * close to the {@code NPROBE}=6 baseline while detection improves markedly.
+     *
+     * <p>Default lowered from 24 to 16 after tuning against the <em>contest score
+     * formula</em> (not detection alone): the score's p99 term is steep
+     * ({@code 1000·log10(1000/p99)}) while the detection penalty is shallow
+     * ({@code -300·log10(1+E)}) and its rate component is clamped for E&le;54. Capping
+     * the adaptive ramp at 16 trims the worst-case scan tail (E rises only 19&rarr;26)
+     * and on the VM lifted the mean final_score from ~4433 (MAX=24) to ~4788.
      */
-    public static final int DEFAULT_MAX_NPROBE = 24;
+    public static final int DEFAULT_MAX_NPROBE = 16;
 
     /** Inclusive lower bound of the baseline fraud-count band that triggers refinement. */
     public static final int REFINE_MIN_FRAUDS = 2;
